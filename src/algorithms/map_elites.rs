@@ -26,7 +26,7 @@ impl<G: Genotype> MapElites<G> {
             population_cache: Vec::new(),
             resolution,
             mutation_rate,
-            batch_size: 1,
+            batch_size: 64, // Reasonable default for parallel evaluation
             rng: Pcg64::seed_from_u64(seed),
         }
     }
@@ -57,15 +57,18 @@ impl<G: Genotype> MapElites<G> {
 
 impl<G: Genotype> Evolver<G> for MapElites<G> {
     fn step<E: Evaluator<G>>(&mut self, evaluator: &E) {
-        let keys: Vec<_> = self.archive.keys().cloned().collect();
-        if keys.is_empty() {
+        if self.archive.is_empty() {
             return;
         }
 
+        // Collect genotypes directly instead of cloning Vec keys
+        // This avoids O(n) heap allocations per step for large archives
+        let parents: Vec<&G> = self.archive.values().map(|p| &p.genotype).collect();
+
         let candidates: Vec<G> = (0..self.batch_size)
             .map(|_| {
-                let key = keys.choose(&mut self.rng).unwrap();
-                let mut dna = self.archive.get(key).unwrap().genotype.clone();
+                let parent = *parents.choose(&mut self.rng).unwrap();
+                let mut dna = parent.clone();
                 dna.mutate(&mut self.rng, self.mutation_rate);
                 dna
             })

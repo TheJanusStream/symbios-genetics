@@ -22,10 +22,6 @@ impl Genotype for StringDNA {
         child.extend_from_slice(&other.0[split..]);
         StringDNA(child)
     }
-
-    fn distance(&self, other: &Self) -> f32 {
-        self.0.iter().zip(&other.0).filter(|(a, b)| a != b).count() as f32
-    }
 }
 
 struct StringEvaluator;

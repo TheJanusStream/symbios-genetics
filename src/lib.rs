@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub trait Genotype: Clone + Serialize + for<'de> Deserialize<'de> + Send + Sync {
     fn mutate<R: Rng>(&mut self, rng: &mut R, rate: f32);
     fn crossover<R: Rng>(&self, other: &Self, rng: &mut R) -> Self;
-    fn distance(&self, other: &Self) -> f32;
 }
 
 #[derive(Clone, Serialize, Deserialize)]

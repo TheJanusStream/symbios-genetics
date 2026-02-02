@@ -20,9 +20,6 @@ impl Genotype for MockDNA {
     fn crossover<R: Rng>(&self, other: &Self, _rng: &mut R) -> Self {
         MockDNA((self.0 + other.0) / 2.0)
     }
-    fn distance(&self, other: &Self) -> f32 {
-        (self.0 - other.0).abs()
-    }
 }
 
 struct MockEval;

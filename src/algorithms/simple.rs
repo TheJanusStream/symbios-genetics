@@ -2,9 +2,21 @@ use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::{IndexedRandom, SeedableRng};
 use rand_pcg::Pcg64; // Specific, serializable generator
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+/// Compare two f32 values, treating NaN as less than all other values.
+/// This ensures NaN fitness individuals sort to the end (lowest priority).
+fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
@@ -40,6 +52,10 @@ impl<G: Genotype> SimpleGA<G> {
 }
 impl<G: Genotype> Evolver<G> for SimpleGA<G> {
     fn step<E: Evaluator<G>>(&mut self, evaluator: &E) {
+        if self.population.is_empty() {
+            return;
+        }
+
         #[cfg(feature = "parallel")]
         self.population.par_iter_mut().for_each(|p| {
             let (f, obj, desc) = evaluator.evaluate(&p.genotype);
@@ -55,20 +71,26 @@ impl<G: Genotype> Evolver<G> for SimpleGA<G> {
             p.descriptor = desc;
         }
 
+        // Sort by fitness descending, with NaN values pushed to the end
         self.population
-            .sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
-        let mut next_gen = self.population[..self.elitism].to_vec();
+            .sort_by(|a, b| cmp_f32_nan_last(b.fitness, a.fitness));
 
+        // Clamp elitism to population size to prevent slice overflow
+        let effective_elitism = self.elitism.min(self.pop_size);
+        let mut next_gen = self.population[..effective_elitism].to_vec();
+
+        // Tournament selection with graceful handling of small populations
+        let tournament_size = 3.min(self.population.len());
         while next_gen.len() < self.pop_size {
             let p_a = self
                 .population
-                .choose_multiple(&mut self.rng, 3)
-                .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
+                .choose_multiple(&mut self.rng, tournament_size)
+                .max_by(|a, b| cmp_f32_nan_last(a.fitness, b.fitness))
                 .unwrap();
             let p_b = self
                 .population
-                .choose_multiple(&mut self.rng, 3)
-                .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
+                .choose_multiple(&mut self.rng, tournament_size)
+                .max_by(|a, b| cmp_f32_nan_last(a.fitness, b.fitness))
                 .unwrap();
             let mut child_dna = p_a.genotype.crossover(&p_b.genotype, &mut self.rng);
             child_dna.mutate(&mut self.rng, self.mutation_rate);

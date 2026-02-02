@@ -33,10 +33,6 @@ impl Genotype for ShapeDNA {
             },
         }
     }
-
-    fn distance(&self, other: &Self) -> f32 {
-        ((self.h - other.h).powi(2) + (self.w - other.w).powi(2)).sqrt()
-    }
 }
 
 struct ShapeEvaluator;
