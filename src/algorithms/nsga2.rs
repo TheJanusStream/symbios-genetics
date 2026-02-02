@@ -1,17 +1,21 @@
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::IndexedRandom;
+use std::cmp::Ordering;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 pub struct Nsga2<G: Genotype> {
-    population: Vec<Phenotype<G>>,
-    pop_size: usize,
-    mutation_rate: f32,
+    pub population: Vec<Phenotype<G>>,
+    pub pop_size: usize,
+    pub mutation_rate: f32,
 }
 
 #[derive(Clone)]
-struct SortWrapper<G: Genotype> {
-    pheno: Phenotype<G>,
-    _rank: usize,
-    distance: f32,
+pub struct SortWrapper<G: Genotype> {
+    pub pheno: Phenotype<G>,
+    pub rank: usize,
+    pub distance: f32,
 }
 
 impl<G: Genotype> Nsga2<G> {
@@ -34,7 +38,7 @@ impl<G: Genotype> Nsga2<G> {
         }
     }
 
-    fn fast_non_dominated_sort(combined: &[Phenotype<G>]) -> Vec<Vec<usize>> {
+    pub fn fast_non_dominated_sort(combined: &[Phenotype<G>]) -> Vec<Vec<usize>> {
         let n = combined.len();
         let mut fronts = vec![vec![]];
         let mut domination_count = vec![0; n];
@@ -42,6 +46,9 @@ impl<G: Genotype> Nsga2<G> {
 
         for i in 0..n {
             for j in 0..n {
+                if i == j {
+                    continue;
+                }
                 if Self::dominates(&combined[i], &combined[j]) {
                     dominated_indices[i].push(j);
                 } else if Self::dominates(&combined[j], &combined[i]) {
@@ -54,7 +61,7 @@ impl<G: Genotype> Nsga2<G> {
         }
 
         let mut curr = 0;
-        while !fronts[curr].is_empty() {
+        while curr < fronts.len() && !fronts[curr].is_empty() {
             let mut next_front = vec![];
             for &i in &fronts[curr] {
                 for &j in &dominated_indices[i] {
@@ -64,13 +71,16 @@ impl<G: Genotype> Nsga2<G> {
                     }
                 }
             }
-            curr += 1;
+            if next_front.is_empty() {
+                break;
+            }
             fronts.push(next_front);
+            curr += 1;
         }
         fronts
     }
 
-    fn calculate_crowding_distance(front: &mut [SortWrapper<G>]) {
+    pub fn calculate_crowding_distance(front: &mut [SortWrapper<G>]) {
         let n = front.len();
         if n == 0 {
             return;
@@ -87,7 +97,7 @@ impl<G: Genotype> Nsga2<G> {
             front.sort_by(|a, b| {
                 a.pheno.objectives[m]
                     .partial_cmp(&b.pheno.objectives[m])
-                    .unwrap()
+                    .unwrap_or(Ordering::Equal)
             });
 
             let min_obj = front[0].pheno.objectives[m];
@@ -109,7 +119,7 @@ impl<G: Genotype> Nsga2<G> {
         }
     }
 
-    fn dominates(a: &Phenotype<G>, b: &Phenotype<G>) -> bool {
+    pub fn dominates(a: &Phenotype<G>, b: &Phenotype<G>) -> bool {
         let mut better_in_any = false;
         for (oa, ob) in a.objectives.iter().zip(b.objectives.iter()) {
             if oa < ob {
@@ -143,11 +153,24 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
 
         let mut combined = self.population.clone();
         combined.extend(offspring);
-        for p in &mut combined {
-            let (fit, obj, desc) = evaluator.evaluate(&p.genotype);
-            p.fitness = fit;
-            p.objectives = obj;
-            p.descriptor = desc;
+
+        #[cfg(feature = "parallel")]
+        {
+            combined.par_iter_mut().for_each(|p| {
+                let (fit, obj, desc) = evaluator.evaluate(&p.genotype);
+                p.fitness = fit;
+                p.objectives = obj;
+                p.descriptor = desc;
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for p in &mut combined {
+                let (fit, obj, desc) = evaluator.evaluate(&p.genotype);
+                p.fitness = fit;
+                p.objectives = obj;
+                p.descriptor = desc;
+            }
         }
 
         let fronts = Self::fast_non_dominated_sort(&combined);
@@ -162,7 +185,7 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
                 .iter()
                 .map(|&i| SortWrapper {
                     pheno: combined[i].clone(),
-                    _rank: rank,
+                    rank,
                     distance: 0.0,
                 })
                 .collect();
@@ -172,7 +195,11 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
             if next_gen_wrappers.len() + current_front.len() <= self.pop_size {
                 next_gen_wrappers.extend(current_front);
             } else {
-                current_front.sort_by(|a, b| b.distance.partial_cmp(&a.distance).unwrap());
+                current_front.sort_by(|a, b| {
+                    b.distance
+                        .partial_cmp(&a.distance)
+                        .unwrap_or(Ordering::Equal)
+                });
                 let needed = self.pop_size - next_gen_wrappers.len();
                 next_gen_wrappers.extend(current_front.into_iter().take(needed));
                 break;
@@ -184,5 +211,62 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
 
     fn population(&self) -> &[Phenotype<G>] {
         &self.population
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Genotype;
+    use rand::Rng;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Serialize, Deserialize)]
+    struct Dummy;
+    impl Genotype for Dummy {
+        fn mutate<R: Rng>(&mut self, _: &mut R, _: f32) {}
+        fn crossover<R: Rng>(&self, _: &Self, _: &mut R) -> Self {
+            Dummy
+        }
+        fn distance(&self, _: &Self) -> f32 {
+            0.0
+        }
+    }
+
+    #[test]
+    fn test_pareto_ranking() {
+        let p1 = Phenotype {
+            genotype: Dummy,
+            fitness: 0.,
+            objectives: vec![10., 0.],
+            descriptor: vec![],
+        };
+        let p2 = Phenotype {
+            genotype: Dummy,
+            fitness: 0.,
+            objectives: vec![0., 10.],
+            descriptor: vec![],
+        };
+        let p3 = Phenotype {
+            genotype: Dummy,
+            fitness: 0.,
+            objectives: vec![5., 5.],
+            descriptor: vec![],
+        };
+        let p_weak = Phenotype {
+            genotype: Dummy,
+            fitness: 0.,
+            objectives: vec![1., 1.],
+            descriptor: vec![],
+        };
+
+        let combined = vec![p1, p2, p3, p_weak];
+        let fronts = Nsga2::<Dummy>::fast_non_dominated_sort(&combined);
+
+        // p1, p2, p3 are non-dominating (Rank 0)
+        assert_eq!(fronts[0].len(), 3);
+        // p_weak is Rank 1
+        assert_eq!(fronts[1].len(), 1);
+        assert_eq!(fronts[1][0], 3);
     }
 }

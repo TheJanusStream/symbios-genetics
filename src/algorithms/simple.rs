@@ -1,6 +1,9 @@
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::IndexedRandom;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 pub struct SimpleGA<G: Genotype> {
     population: Vec<Phenotype<G>>,
     pop_size: usize,
@@ -32,11 +35,24 @@ impl<G: Genotype> SimpleGA<G> {
 
 impl<G: Genotype> Evolver<G> for SimpleGA<G> {
     fn step<E: Evaluator<G>>(&mut self, evaluator: &E) {
-        for p in &mut self.population {
-            let (f, obj, desc) = evaluator.evaluate(&p.genotype);
-            p.fitness = f;
-            p.objectives = obj;
-            p.descriptor = desc;
+        // 1. Parallel Evaluation
+        #[cfg(feature = "parallel")]
+        {
+            self.population.par_iter_mut().for_each(|p| {
+                let (f, obj, desc) = evaluator.evaluate(&p.genotype);
+                p.fitness = f;
+                p.objectives = obj;
+                p.descriptor = desc;
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for p in &mut self.population {
+                let (f, obj, desc) = evaluator.evaluate(&p.genotype);
+                p.fitness = f;
+                p.objectives = obj;
+                p.descriptor = desc;
+            }
         }
 
         self.population
