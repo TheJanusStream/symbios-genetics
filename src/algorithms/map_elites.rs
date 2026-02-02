@@ -2,7 +2,7 @@ use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64; // Specific, serializable generator
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -11,7 +11,7 @@ use rayon::prelude::*;
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
 struct MapElitesData<G: Genotype> {
-    archive: HashMap<Vec<usize>, Phenotype<G>>,
+    archive: BTreeMap<Vec<usize>, Phenotype<G>>,
     resolution: usize,
     mutation_rate: f32,
     batch_size: usize,
@@ -19,7 +19,7 @@ struct MapElitesData<G: Genotype> {
 }
 
 pub struct MapElites<G: Genotype> {
-    archive: HashMap<Vec<usize>, Phenotype<G>>,
+    archive: BTreeMap<Vec<usize>, Phenotype<G>>,
     population_cache: Vec<Phenotype<G>>,
     cache_valid: bool,
     resolution: usize,
@@ -65,8 +65,9 @@ impl<'de, G: Genotype> Deserialize<'de> for MapElites<G> {
 
 impl<G: Genotype> MapElites<G> {
     pub fn new(resolution: usize, mutation_rate: f32, seed: u64) -> Self {
+        assert!(resolution > 0, "resolution must be greater than 0");
         Self {
-            archive: HashMap::new(),
+            archive: BTreeMap::new(),
             population_cache: Vec::new(),
             cache_valid: true,
             resolution,
@@ -93,6 +94,7 @@ impl<G: Genotype> MapElites<G> {
     }
 
     pub fn set_batch_size(&mut self, size: usize) {
+        assert!(size > 0, "batch_size must be greater than 0");
         self.batch_size = size;
     }
 
@@ -124,17 +126,22 @@ impl<G: Genotype> MapElites<G> {
         for dna in initial {
             let (f, obj, desc) = evaluator.evaluate(&dna);
             let idx = self.map_to_index(&desc);
-            self.archive.insert(
-                idx,
-                Phenotype {
-                    genotype: dna,
-                    fitness: f,
-                    objectives: obj,
-                    descriptor: desc,
-                },
-            );
+            let new_pheno = Phenotype {
+                genotype: dna,
+                fitness: f,
+                objectives: obj,
+                descriptor: desc,
+            };
+            // Respect elitism: only insert if no existing elite or new individual is better
+            if self
+                .archive
+                .get(&idx)
+                .is_none_or(|existing| new_pheno.fitness > existing.fitness)
+            {
+                self.archive.insert(idx, new_pheno);
+                self.cache_valid = false;
+            }
         }
-        self.cache_valid = false;
     }
 
     fn ensure_cache_valid(&mut self) {

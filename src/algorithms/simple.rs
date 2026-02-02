@@ -21,10 +21,10 @@ fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
 pub struct SimpleGA<G: Genotype> {
-    pub population: Vec<Phenotype<G>>,
-    pub pop_size: usize,
-    pub mutation_rate: f32,
-    pub elitism: usize,
+    population: Vec<Phenotype<G>>,
+    pop_size: usize,
+    mutation_rate: f32,
+    elitism: usize,
     rng: Pcg64, // Now satisfies the Serialize/Deserialize bound
 }
 
@@ -48,6 +48,18 @@ impl<G: Genotype> SimpleGA<G> {
             elitism,
             rng: Pcg64::seed_from_u64(seed),
         }
+    }
+
+    pub fn pop_size(&self) -> usize {
+        self.pop_size
+    }
+
+    pub fn mutation_rate(&self) -> f32 {
+        self.mutation_rate
+    }
+
+    pub fn elitism(&self) -> usize {
+        self.elitism
     }
 }
 impl<G: Genotype> Evolver<G> for SimpleGA<G> {
