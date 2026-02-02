@@ -57,7 +57,7 @@ fn main() {
         .map(|_| BitDNA((0..BIT_COUNT).map(|_| rng.random_bool(0.5)).collect()))
         .collect();
 
-    let mut ga = SimpleGA::new(initial_pop, 0.02, 2);
+    let mut ga = SimpleGA::new(initial_pop, 0.02, 2, 42);
     let eval = BitEvaluator {
         target: target_pattern,
     };

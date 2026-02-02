@@ -57,7 +57,7 @@ fn main() {
     let mutation_rate = 0.2;
     let resolution = 10; // 10x10 grid = 100 niches
 
-    let mut engine = MapElites::new(2, resolution, mutation_rate);
+    let mut engine = MapElites::new(resolution, mutation_rate, 42);
     engine.batch_size = 50;
     let eval = ShapeEvaluator;
 

@@ -41,7 +41,7 @@ impl Evaluator<HeavyDNA> for HeavyEvaluator {
 fn stress_test_parallel_throughput() {
     let pop_size = 1000;
     let initial_pop: Vec<HeavyDNA> = (0..pop_size).map(|_| HeavyDNA(vec![0.0; 10])).collect();
-    let mut ga = SimpleGA::new(initial_pop, 0.1, 10);
+    let mut ga = SimpleGA::new(initial_pop, 0.1, 10, 42);
     let eval = HeavyEvaluator;
 
     println!("Starting Heavy Stress Test (1000 individuals @ 1ms sleep)...");

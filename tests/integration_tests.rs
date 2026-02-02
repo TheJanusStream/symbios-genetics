@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_map_elites_index_mapping() {
-        let engine = MapElites::<MockDNA>::new(1, 10, 0.1);
+        let engine = MapElites::<MockDNA>::new(10, 0.1, 42);
         assert_eq!(engine.map_to_index(&[0.0]), vec![0]);
         assert_eq!(engine.map_to_index(&[1.0]), vec![9]);
     }
@@ -52,7 +52,7 @@ mod tests {
     fn test_nsga2_step_diversity() {
         // Use a mutation rate of 0.0 to ensure 1.0 and 3.0 remain extreme boundaries
         let initial_pop = vec![MockDNA(1.0), MockDNA(2.0), MockDNA(3.0)];
-        let mut engine = Nsga2::new(initial_pop, 0.0);
+        let mut engine = Nsga2::new(initial_pop, 0.0, 42);
         let eval = MockEval;
 
         engine.step(&eval);

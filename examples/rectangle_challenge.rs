@@ -54,7 +54,7 @@ fn main() {
         })
         .collect();
 
-    let mut engine = Nsga2::new(initial_pop, 0.1);
+    let mut engine = Nsga2::new(initial_pop, 0.1, 42);
     let eval = RectEvaluator;
 
     println!("Running Rectangle Trade-off (Max Area vs Min Perimeter)...");

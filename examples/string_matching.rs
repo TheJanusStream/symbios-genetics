@@ -53,7 +53,7 @@ fn main() {
         })
         .collect();
 
-    let mut ga = SimpleGA::new(initial_pop, 0.05, 5);
+    let mut ga = SimpleGA::new(initial_pop, 0.05, 5, 42);
     let eval = StringEvaluator;
 
     for generation in 0..500 {
