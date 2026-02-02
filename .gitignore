@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock
+/.claude
+/.chainlink
+CHANGELOG.md
+symbios-genetics-primer.sh
+symbios_genetics_primer_*
