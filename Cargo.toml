@@ -9,9 +9,8 @@ readme = "README.md"
 repository = "https://github.com/TheJanusStream/symbios-genetics"
 keywords = [
     "simulation",
-    "evolutionary-algorithms",
+    "evolution",
     "quality-diversity",
-    "multi-objective-optimization",
     "genetic-algorithms",
 ]
 categories = ["simulation", "algorithms", "biology"]
