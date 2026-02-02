@@ -1,13 +1,88 @@
+//! Simple generational genetic algorithm with elitism.
+//!
+//! A straightforward genetic algorithm for single-objective optimization.
+//! Uses tournament selection, crossover, mutation, and elitism.
+//!
+//! # Overview
+//!
+//! SimpleGA is ideal for single-objective optimization problems where you want
+//! to maximize a scalar fitness value. It's simple to use and efficient for
+//! many common optimization tasks.
+//!
+//! # Features
+//!
+//! - **Elitism**: Top individuals survive unchanged to the next generation
+//! - **Tournament Selection**: Size-3 tournaments balance exploration and exploitation
+//! - **Parallel Evaluation**: Optional parallel fitness evaluation via Rayon
+//! - **NaN Handling**: Gracefully handles NaN fitness values
+//!
+//! # Example
+//!
+//! ```rust
+//! use rand::Rng;
+//! use serde::{Deserialize, Serialize};
+//! use symbios_genetics::{Evaluator, Evolver, Genotype, algorithms::simple::SimpleGA};
+//!
+//! #[derive(Clone, Serialize, Deserialize)]
+//! struct FloatVec(Vec<f32>);
+//!
+//! impl Genotype for FloatVec {
+//!     fn mutate<R: Rng>(&mut self, rng: &mut R, rate: f32) {
+//!         for v in &mut self.0 {
+//!             if rng.random::<f32>() < rate {
+//!                 *v += rng.random::<f32>() - 0.5;
+//!             }
+//!         }
+//!     }
+//!     fn crossover<R: Rng>(&self, other: &Self, rng: &mut R) -> Self {
+//!         let point = rng.random_range(0..self.0.len());
+//!         let mut child = self.0[..point].to_vec();
+//!         child.extend_from_slice(&other.0[point..]);
+//!         FloatVec(child)
+//!     }
+//! }
+//!
+//! // Maximize sum of values
+//! struct SumFitness;
+//! impl Evaluator<FloatVec> for SumFitness {
+//!     fn evaluate(&self, g: &FloatVec) -> (f32, Vec<f32>, Vec<f32>) {
+//!         let sum: f32 = g.0.iter().sum();
+//!         (sum, vec![sum], vec![])
+//!     }
+//! }
+//!
+//! let initial: Vec<FloatVec> = (0..50)
+//!     .map(|_| FloatVec(vec![0.0; 10]))
+//!     .collect();
+//!
+//! let mut ga = SimpleGA::new(initial, 0.1, 5, 42);
+//!
+//! for _ in 0..100 {
+//!     ga.step(&SumFitness);
+//! }
+//!
+//! let best = ga.population().first().unwrap();
+//! println!("Best fitness: {}", best.fitness);
+//! ```
+//!
+//! # Algorithm Details
+//!
+//! Each generation:
+//! 1. Evaluate all individuals
+//! 2. Sort by fitness (descending)
+//! 3. Copy top `elitism` individuals to next generation
+//! 4. Fill remaining slots via tournament selection, crossover, and mutation
+
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::{IndexedRandom, SeedableRng};
-use rand_pcg::Pcg64; // Specific, serializable generator
+use rand_pcg::Pcg64;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Compare two f32 values, treating NaN as less than all other values.
+/// Compares two f32 values, treating NaN as less than all other values.
 /// This ensures NaN fitness individuals sort to the end (lowest priority).
 fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
     match (a.is_nan(), b.is_nan()) {
@@ -18,6 +93,24 @@ fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
     }
 }
 
+/// Simple generational genetic algorithm with elitism.
+///
+/// A classic genetic algorithm that maintains a fixed-size population and
+/// uses tournament selection for parent selection.
+///
+/// # Type Parameters
+///
+/// * `G` - The genotype type, must implement [`Genotype`]
+///
+/// # Selection Mechanism
+///
+/// Uses tournament selection with size 3 (or smaller for tiny populations).
+/// The winner of each tournament is selected as a parent.
+///
+/// # Elitism
+///
+/// The top `elitism` individuals (by fitness) are copied unchanged to the
+/// next generation, ensuring the best solutions are never lost.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
 pub struct SimpleGA<G: Genotype> {
@@ -25,10 +118,25 @@ pub struct SimpleGA<G: Genotype> {
     pop_size: usize,
     mutation_rate: f32,
     elitism: usize,
-    rng: Pcg64, // Now satisfies the Serialize/Deserialize bound
+    rng: Pcg64,
 }
 
 impl<G: Genotype> SimpleGA<G> {
+    /// Creates a new SimpleGA instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_pop` - Initial population of genotypes
+    /// * `mutation_rate` - Probability of mutation, typically in `[0.0, 1.0]`
+    /// * `elitism` - Number of top individuals to preserve each generation
+    /// * `seed` - RNG seed for deterministic execution
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let initial: Vec<MyGenome> = (0..100).map(|_| MyGenome::random()).collect();
+    /// let mut ga = SimpleGA::new(initial, 0.1, 5, 42);
+    /// ```
     pub fn new(initial_pop: Vec<G>, mutation_rate: f32, elitism: usize, seed: u64) -> Self {
         let pop_size = initial_pop.len();
         let population = initial_pop
@@ -50,14 +158,17 @@ impl<G: Genotype> SimpleGA<G> {
         }
     }
 
+    /// Returns the population size.
     pub fn pop_size(&self) -> usize {
         self.pop_size
     }
 
+    /// Returns the current mutation rate.
     pub fn mutation_rate(&self) -> f32 {
         self.mutation_rate
     }
 
+    /// Returns the elitism count.
     pub fn elitism(&self) -> usize {
         self.elitism
     }

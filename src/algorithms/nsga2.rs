@@ -1,19 +1,112 @@
+//! NSGA-II multi-objective evolutionary algorithm.
+//!
+//! NSGA-II (Non-dominated Sorting Genetic Algorithm II) is a popular algorithm
+//! for multi-objective optimization that finds a set of Pareto-optimal solutions.
+//!
+//! # Overview
+//!
+//! In multi-objective optimization, there is no single "best" solution because
+//! objectives may conflict. Instead, NSGA-II finds the *Pareto front*: solutions
+//! where no objective can be improved without worsening another.
+//!
+//! # Key Concepts
+//!
+//! - **Pareto Dominance**: Solution A *dominates* B if A is at least as good in
+//!   all objectives and strictly better in at least one
+//! - **Pareto Front**: The set of non-dominated solutions (rank 0)
+//! - **Crowding Distance**: Measures solution diversity; higher means more isolated
+//!
+//! # Example
+//!
+//! ```rust
+//! use rand::Rng;
+//! use serde::{Deserialize, Serialize};
+//! use symbios_genetics::{Evaluator, Evolver, Genotype, algorithms::nsga2::Nsga2};
+//!
+//! #[derive(Clone, Serialize, Deserialize)]
+//! struct Design { weight: f32, cost: f32 }
+//!
+//! impl Genotype for Design {
+//!     fn mutate<R: Rng>(&mut self, rng: &mut R, rate: f32) {
+//!         if rng.random::<f32>() < rate {
+//!             self.weight += rng.random::<f32>() - 0.5;
+//!             self.cost += rng.random::<f32>() - 0.5;
+//!         }
+//!     }
+//!     fn crossover<R: Rng>(&self, other: &Self, _rng: &mut R) -> Self {
+//!         Design {
+//!             weight: (self.weight + other.weight) / 2.0,
+//!             cost: (self.cost + other.cost) / 2.0,
+//!         }
+//!     }
+//! }
+//!
+//! // Minimize weight, minimize cost (negate for maximization)
+//! struct MultiObjective;
+//! impl Evaluator<Design> for MultiObjective {
+//!     fn evaluate(&self, g: &Design) -> (f32, Vec<f32>, Vec<f32>) {
+//!         let obj1 = -g.weight; // Minimize weight
+//!         let obj2 = -g.cost;   // Minimize cost
+//!         (obj1 + obj2, vec![obj1, obj2], vec![])
+//!     }
+//! }
+//!
+//! let initial: Vec<Design> = (0..50)
+//!     .map(|i| Design { weight: i as f32, cost: 50.0 - i as f32 })
+//!     .collect();
+//!
+//! let mut nsga = Nsga2::new(initial, 0.1, 42);
+//! for _ in 0..100 {
+//!     nsga.step(&MultiObjective);
+//! }
+//!
+//! // Population now approximates the Pareto front
+//! ```
+//!
+//! # Algorithm Details
+//!
+//! Each generation:
+//! 1. Creates offspring via binary tournament selection, crossover, and mutation
+//! 2. Combines parents and offspring (2N individuals)
+//! 3. Performs fast non-dominated sorting to rank solutions
+//! 4. Calculates crowding distance within each front
+//! 5. Selects best N individuals by rank, then by crowding distance
+//!
+//! # References
+//!
+//! Deb, K., et al. (2002). A fast and elitist multiobjective genetic algorithm: NSGA-II.
+//! IEEE Transactions on Evolutionary Computation, 6(2), 182-197.
+
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::SeedableRng;
-use rand_pcg::Pcg64; // Specific, serializable generator
+use rand_pcg::Pcg64;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// NSGA-II multi-objective evolutionary algorithm.
+///
+/// Maintains a population that evolves toward the Pareto front of a
+/// multi-objective optimization problem.
+///
+/// # Type Parameters
+///
+/// * `G` - The genotype type, must implement [`Genotype`]
+///
+/// # Selection Mechanism
+///
+/// NSGA-II uses binary tournament selection based on:
+/// 1. **Rank** (lower is better): Solutions on the Pareto front have rank 0
+/// 2. **Crowding distance** (higher is better): Tie-breaker that favors diversity
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
 pub struct Nsga2<G: Genotype> {
     population: Vec<Phenotype<G>>,
-    /// Stored rank for each individual (lower is better)
+    /// Pareto rank for each individual (0 = non-dominated front).
     ranks: Vec<usize>,
-    /// Stored crowding distance for each individual (higher is better)
+    /// Crowding distance for diversity preservation (higher = more isolated).
     crowding_distances: Vec<f32>,
     pop_size: usize,
     mutation_rate: f32,
@@ -21,27 +114,52 @@ pub struct Nsga2<G: Genotype> {
 }
 
 impl<G: Genotype> Nsga2<G> {
+    /// Returns the population size.
     pub fn pop_size(&self) -> usize {
         self.pop_size
     }
 
+    /// Returns the current mutation rate.
     pub fn mutation_rate(&self) -> f32 {
         self.mutation_rate
     }
 
+    /// Sets the mutation rate.
+    ///
+    /// # Arguments
+    ///
+    /// * `rate` - New mutation rate, typically in `[0.0, 1.0]`
     pub fn set_mutation_rate(&mut self, rate: f32) {
         self.mutation_rate = rate;
     }
 }
 
+/// Internal wrapper for sorting individuals by rank and crowding distance.
 #[derive(Clone)]
 pub struct SortWrapper<G: Genotype> {
+    /// The phenotype being wrapped.
     pub pheno: Phenotype<G>,
+    /// Pareto rank (0 = non-dominated front).
     pub rank: usize,
+    /// Crowding distance for diversity.
     pub distance: f32,
 }
 
 impl<G: Genotype> Nsga2<G> {
+    /// Creates a new NSGA-II instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_pop` - Initial population of genotypes
+    /// * `mutation_rate` - Probability of mutation, typically in `[0.0, 1.0]`
+    /// * `seed` - RNG seed for deterministic execution
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let initial: Vec<MyGenome> = (0..100).map(|_| MyGenome::random()).collect();
+    /// let mut nsga = Nsga2::new(initial, 0.1, 42);
+    /// ```
     pub fn new(initial_pop: Vec<G>, mutation_rate: f32, seed: u64) -> Self {
         let pop_size = initial_pop.len();
         let population: Vec<_> = initial_pop
@@ -54,7 +172,6 @@ impl<G: Genotype> Nsga2<G> {
             })
             .collect();
 
-        // Initialize with default ranks (all equal) and infinite crowding distance
         let ranks = vec![0; population.len()];
         let crowding_distances = vec![f32::INFINITY; population.len()];
 
@@ -68,20 +185,20 @@ impl<G: Genotype> Nsga2<G> {
         }
     }
 
-    /// Binary tournament selection: picks 2 random individuals and returns
-    /// the one with better rank (lower), or better crowding distance (higher) if tied.
+    /// Binary tournament selection.
+    ///
+    /// Picks 2 random individuals and returns the index of the better one.
+    /// Comparison is by rank (lower is better), then crowding distance (higher is better).
     fn binary_tournament(&mut self) -> usize {
         use rand::Rng;
         let n = self.population.len();
         let i = self.rng.random_range(0..n);
         let j = self.rng.random_range(0..n);
 
-        // Compare by rank first (lower is better)
         match self.ranks[i].cmp(&self.ranks[j]) {
             Ordering::Less => i,
             Ordering::Greater => j,
             Ordering::Equal => {
-                // Tie-break by crowding distance (higher is better)
                 if self.crowding_distances[i] >= self.crowding_distances[j] {
                     i
                 } else {
@@ -91,6 +208,23 @@ impl<G: Genotype> Nsga2<G> {
         }
     }
 
+    /// Performs fast non-dominated sorting.
+    ///
+    /// Partitions the population into Pareto fronts where front 0 contains
+    /// non-dominated solutions, front 1 contains solutions dominated only by
+    /// front 0, and so on.
+    ///
+    /// # Arguments
+    ///
+    /// * `combined` - Slice of phenotypes to sort
+    ///
+    /// # Returns
+    ///
+    /// Vector of fronts, where each front is a vector of indices into `combined`.
+    ///
+    /// # Complexity
+    ///
+    /// O(MN²) where M is the number of objectives and N is the population size.
     pub fn fast_non_dominated_sort(combined: &[Phenotype<G>]) -> Vec<Vec<usize>> {
         let n = combined.len();
         let mut fronts = vec![vec![]];
@@ -133,6 +267,22 @@ impl<G: Genotype> Nsga2<G> {
         fronts
     }
 
+    /// Calculates crowding distance for a Pareto front.
+    ///
+    /// Crowding distance measures how isolated a solution is in objective space.
+    /// Solutions at the boundaries get infinite distance; interior solutions get
+    /// distance based on their neighbors.
+    ///
+    /// # Arguments
+    ///
+    /// * `front` - Mutable slice of wrapped phenotypes in the same Pareto front
+    ///
+    /// # Algorithm
+    ///
+    /// For each objective:
+    /// 1. Sort the front by that objective
+    /// 2. Assign infinite distance to boundary solutions
+    /// 3. Add normalized neighbor distance to interior solutions
     pub fn calculate_crowding_distance(front: &mut [SortWrapper<G>]) {
         let n = front.len();
         if n <= 2 {
@@ -142,7 +292,6 @@ impl<G: Genotype> Nsga2<G> {
             return;
         }
 
-        // Check for consistent objective counts
         let min_obj = front
             .iter()
             .map(|w| w.pheno.objectives.len())
@@ -155,7 +304,6 @@ impl<G: Genotype> Nsga2<G> {
             .unwrap_or(0);
 
         if min_obj == 0 {
-            // No objectives: all get infinite distance (equally preferred)
             for ind in front {
                 ind.distance = f32::INFINITY;
             }
@@ -163,8 +311,6 @@ impl<G: Genotype> Nsga2<G> {
         }
 
         if min_obj != max_obj {
-            // Ragged objectives: individuals are incomparable for crowding
-            // Give all infinite distance so selection falls back to rank only
             for ind in front {
                 ind.distance = f32::INFINITY;
             }
@@ -194,8 +340,29 @@ impl<G: Genotype> Nsga2<G> {
         }
     }
 
+    /// Tests if solution `a` Pareto-dominates solution `b`.
+    ///
+    /// Solution `a` dominates `b` if:
+    /// - `a` is at least as good as `b` in all objectives
+    /// - `a` is strictly better than `b` in at least one objective
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - First phenotype
+    /// * `b` - Second phenotype
+    ///
+    /// # Returns
+    ///
+    /// `true` if `a` dominates `b`, `false` otherwise.
+    /// Returns `false` if objective counts differ (incomparable).
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// a = [3, 2], b = [2, 1] -> a dominates b (better in both)
+    /// a = [3, 1], b = [2, 2] -> neither dominates (trade-off)
+    /// ```
     pub fn dominates(a: &Phenotype<G>, b: &Phenotype<G>) -> bool {
-        // Incomparable if objective counts differ
         if a.objectives.len() != b.objectives.len() {
             return false;
         }
