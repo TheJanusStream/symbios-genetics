@@ -2,8 +2,19 @@
 name = "symbios-genetics"
 version = "0.1.0"
 edition = "2024"
-authors = ["codewright", "Kairos"]
+authors = ["Janus"]
 description = "Sovereign biology engine for Quality-Diversity and Multi-Objective evolution."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/TheJanusStream/symbios-genetics"
+keywords = [
+    "simulation",
+    "evolutionary-algorithms",
+    "quality-diversity",
+    "multi-objective-optimization",
+    "genetic-algorithms",
+]
+categories = ["simulation", "algorithms", "biology"]
 
 [dependencies]
 rand = { version = "0.9", features = ["small_rng"] }
