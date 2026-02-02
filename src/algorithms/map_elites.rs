@@ -93,6 +93,9 @@ use rayon::prelude::*;
 #[serde(bound = "G: Genotype")]
 struct MapElitesData<G: Genotype> {
     archive: BTreeMap<Vec<usize>, Phenotype<G>>,
+    /// Vec of archive keys for O(1) random parent sampling.
+    /// Kept in sync with archive to avoid O(N) iteration during step().
+    archive_keys_vec: Vec<Vec<usize>>,
     resolution: usize,
     mutation_rate: f32,
     batch_size: usize,
@@ -122,6 +125,9 @@ struct MapElitesData<G: Genotype> {
 /// ([`BTreeMap`]) to ensure reproducible results across runs.
 pub struct MapElites<G: Genotype> {
     archive: BTreeMap<Vec<usize>, Phenotype<G>>,
+    /// Vec of archive keys for O(1) random parent sampling.
+    /// Avoids O(N) iteration of BTreeMap during step().
+    archive_keys_vec: Vec<Vec<usize>>,
     population_cache: Vec<Phenotype<G>>,
     cache_valid: bool,
     resolution: usize,
@@ -136,8 +142,9 @@ impl<G: Genotype> Serialize for MapElites<G> {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("MapElites", 5)?;
+        let mut state = serializer.serialize_struct("MapElites", 6)?;
         state.serialize_field("archive", &self.archive)?;
+        state.serialize_field("archive_keys_vec", &self.archive_keys_vec)?;
         state.serialize_field("resolution", &self.resolution)?;
         state.serialize_field("mutation_rate", &self.mutation_rate)?;
         state.serialize_field("batch_size", &self.batch_size)?;
@@ -155,6 +162,7 @@ impl<'de, G: Genotype> Deserialize<'de> for MapElites<G> {
         let population_cache: Vec<Phenotype<G>> = data.archive.values().cloned().collect();
         Ok(Self {
             archive: data.archive,
+            archive_keys_vec: data.archive_keys_vec,
             population_cache,
             cache_valid: true,
             resolution: data.resolution,
@@ -198,6 +206,7 @@ impl<G: Genotype> MapElites<G> {
         assert!(resolution > 0, "resolution must be greater than 0");
         Self {
             archive: BTreeMap::new(),
+            archive_keys_vec: Vec::new(),
             population_cache: Vec::new(),
             cache_valid: true,
             resolution,
@@ -328,7 +337,11 @@ impl<G: Genotype> MapElites<G> {
                 .get(&idx)
                 .is_none_or(|existing| new_pheno.fitness > existing.fitness)
             {
-                self.archive.insert(idx, new_pheno);
+                let is_new_key = !self.archive.contains_key(&idx);
+                self.archive.insert(idx.clone(), new_pheno);
+                if is_new_key {
+                    self.archive_keys_vec.push(idx);
+                }
                 self.cache_valid = false;
             }
         }
@@ -364,11 +377,41 @@ impl<G: Genotype> MapElites<G> {
     pub fn map_to_index(&self, descriptor: &[f32]) -> Vec<usize> {
         descriptor
             .iter()
-            .map(|&v| {
-                let scaled = v.clamp(0.0, 1.0) * self.resolution as f32;
-                (scaled.floor() as usize).min(self.resolution - 1)
-            })
+            .map(|&v| self.map_single_dimension(v))
             .collect()
+    }
+
+    /// Maps a behavioral descriptor into a pre-allocated buffer.
+    ///
+    /// This is an allocation-free alternative to [`map_to_index`] for
+    /// high-throughput use cases. The buffer must have at least as many
+    /// elements as the descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `descriptor` - Behavioral descriptor values
+    /// * `buffer` - Pre-allocated buffer to write indices into
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buffer.len() < descriptor.len()`.
+    pub fn map_to_index_into(&self, descriptor: &[f32], buffer: &mut [usize]) {
+        assert!(
+            buffer.len() >= descriptor.len(),
+            "buffer too small: {} < {}",
+            buffer.len(),
+            descriptor.len()
+        );
+        for (i, &v) in descriptor.iter().enumerate() {
+            buffer[i] = self.map_single_dimension(v);
+        }
+    }
+
+    /// Maps a single descriptor dimension to a bin index.
+    #[inline]
+    fn map_single_dimension(&self, v: f32) -> usize {
+        let scaled = v.clamp(0.0, 1.0) * self.resolution as f32;
+        (scaled.floor() as usize).min(self.resolution - 1)
     }
 }
 
@@ -380,26 +423,33 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
             return;
         }
 
-        // Collect genotypes directly instead of cloning Vec keys
-        let parents: Vec<&G> = self.archive.values().map(|p| &p.genotype).collect();
         let mutation_rate = self.mutation_rate;
+        let num_keys = self.archive_keys_vec.len();
 
-        // Pre-select parents and generate RNG seeds serially (RNG needs mutable access)
-        let selections: Vec<(usize, u64)> = (0..self.batch_size)
+        // Pre-select parent keys and generate RNG seeds serially (RNG needs mutable access)
+        // O(batch_size) instead of O(archive_size)
+        let selections: Vec<(Vec<usize>, u64)> = (0..self.batch_size)
             .map(|_| {
-                let parent_idx = self.rng.random_range(0..parents.len());
+                let key_idx = self.rng.random_range(0..num_keys);
+                let key = self.archive_keys_vec[key_idx].clone();
                 let seed = self.rng.random::<u64>();
-                (parent_idx, seed)
+                (key, seed)
             })
             .collect();
 
-        // Parallel: clone parents, mutate with per-task RNG, and evaluate
+        // Clone parents outside parallel section to avoid holding reference across threads
+        let parents: Vec<G> = selections
+            .iter()
+            .map(|(key, _)| self.archive.get(key).unwrap().genotype.clone())
+            .collect();
+
+        // Parallel: mutate with per-task RNG and evaluate
         #[cfg(feature = "parallel")]
-        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = selections
+        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = parents
             .into_par_iter()
-            .map(|(parent_idx, seed)| {
+            .zip(selections.into_par_iter())
+            .map(|(mut dna, (_, seed))| {
                 let mut rng = Pcg64::seed_from_u64(seed);
-                let mut dna = parents[parent_idx].clone();
                 dna.mutate(&mut rng, mutation_rate);
                 let (f, obj, desc) = evaluator.evaluate(&dna);
                 (dna, f, obj, desc)
@@ -407,11 +457,11 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
             .collect();
 
         #[cfg(not(feature = "parallel"))]
-        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = selections
+        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = parents
             .into_iter()
-            .map(|(parent_idx, seed)| {
+            .zip(selections.into_iter())
+            .map(|(mut dna, (_, seed))| {
                 let mut rng = Pcg64::seed_from_u64(seed);
-                let mut dna = parents[parent_idx].clone();
                 dna.mutate(&mut rng, mutation_rate);
                 let (f, obj, desc) = evaluator.evaluate(&dna);
                 (dna, f, obj, desc)
@@ -431,7 +481,11 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
                 .get(&idx)
                 .is_none_or(|e| new_pheno.fitness > e.fitness)
             {
-                self.archive.insert(idx, new_pheno);
+                let is_new_key = !self.archive.contains_key(&idx);
+                self.archive.insert(idx.clone(), new_pheno);
+                if is_new_key {
+                    self.archive_keys_vec.push(idx);
+                }
                 self.cache_valid = false;
             }
         }

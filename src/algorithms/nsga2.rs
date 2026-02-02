@@ -135,10 +135,11 @@ impl<G: Genotype> Nsga2<G> {
 }
 
 /// Internal wrapper for sorting individuals by rank and crowding distance.
-#[derive(Clone)]
-pub struct SortWrapper<G: Genotype> {
-    /// The phenotype being wrapped.
-    pub pheno: Phenotype<G>,
+/// Uses index into combined population to avoid cloning phenotypes during sorting.
+#[derive(Clone, Copy)]
+pub struct SortWrapper {
+    /// Index into the combined population vector.
+    pub index: usize,
     /// Pareto rank (0 = non-dominated front).
     pub rank: usize,
     /// Crowding distance for diversity.
@@ -275,7 +276,8 @@ impl<G: Genotype> Nsga2<G> {
     ///
     /// # Arguments
     ///
-    /// * `front` - Mutable slice of wrapped phenotypes in the same Pareto front
+    /// * `front` - Mutable slice of sort wrappers (indices) in the same Pareto front
+    /// * `combined` - Reference to the combined population for accessing objectives
     ///
     /// # Algorithm
     ///
@@ -283,7 +285,7 @@ impl<G: Genotype> Nsga2<G> {
     /// 1. Sort the front by that objective
     /// 2. Assign infinite distance to boundary solutions
     /// 3. Add normalized neighbor distance to interior solutions
-    pub fn calculate_crowding_distance(front: &mut [SortWrapper<G>]) {
+    pub fn calculate_crowding_distance(front: &mut [SortWrapper], combined: &[Phenotype<G>]) {
         let n = front.len();
         if n <= 2 {
             for ind in front {
@@ -294,12 +296,12 @@ impl<G: Genotype> Nsga2<G> {
 
         let min_obj = front
             .iter()
-            .map(|w| w.pheno.objectives.len())
+            .map(|w| combined[w.index].objectives.len())
             .min()
             .unwrap_or(0);
         let max_obj = front
             .iter()
-            .map(|w| w.pheno.objectives.len())
+            .map(|w| combined[w.index].objectives.len())
             .max()
             .unwrap_or(0);
 
@@ -321,18 +323,19 @@ impl<G: Genotype> Nsga2<G> {
 
         for m in 0..obj_count {
             front.sort_by(|a, b| {
-                a.pheno.objectives[m]
-                    .partial_cmp(&b.pheno.objectives[m])
+                combined[a.index].objectives[m]
+                    .partial_cmp(&combined[b.index].objectives[m])
                     .unwrap_or(Ordering::Equal)
             });
-            let range = front[n - 1].pheno.objectives[m] - front[0].pheno.objectives[m];
+            let range =
+                combined[front[n - 1].index].objectives[m] - combined[front[0].index].objectives[m];
             front[0].distance = f32::INFINITY;
             front[n - 1].distance = f32::INFINITY;
             if range > 0.0 {
                 for i in 1..(n - 1) {
                     if front[i].distance != f32::INFINITY {
-                        front[i].distance += (front[i + 1].pheno.objectives[m]
-                            - front[i - 1].pheno.objectives[m])
+                        front[i].distance += (combined[front[i + 1].index].objectives[m]
+                            - combined[front[i - 1].index].objectives[m])
                             / range;
                     }
                 }
@@ -421,17 +424,17 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
         }
 
         let fronts = Self::fast_non_dominated_sort(&combined);
-        let mut next_gen = vec![];
+        let mut next_gen: Vec<SortWrapper> = vec![];
         for (rank, indices) in fronts.iter().enumerate() {
             let mut current_front: Vec<_> = indices
                 .iter()
                 .map(|&i| SortWrapper {
-                    pheno: combined[i].clone(),
+                    index: i,
                     rank,
                     distance: 0.0,
                 })
                 .collect();
-            Self::calculate_crowding_distance(&mut current_front);
+            Self::calculate_crowding_distance(&mut current_front, &combined);
             if next_gen.len() + current_front.len() <= self.pop_size {
                 next_gen.extend(current_front);
             } else {
@@ -452,7 +455,11 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
         // Store ranks and crowding distances for next generation's tournament selection
         self.ranks = next_gen.iter().map(|w| w.rank).collect();
         self.crowding_distances = next_gen.iter().map(|w| w.distance).collect();
-        self.population = next_gen.into_iter().map(|w| w.pheno).collect();
+        // Only clone phenotypes when building the final population
+        self.population = next_gen
+            .into_iter()
+            .map(|w| combined[w.index].clone())
+            .collect();
     }
     fn population(&mut self) -> &[Phenotype<G>] {
         &self.population

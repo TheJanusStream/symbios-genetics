@@ -285,3 +285,271 @@ fn test_map_elites_batch_size_one_works() {
     // Should complete without stalling
     assert!(engine.archive_len() >= 1);
 }
+
+// ============================================================================
+// Performance Issue: MapElites O(N) parent selection scaling
+// Review: src/algorithms/map_elites.rs line 384
+// ============================================================================
+
+/// Test that MapElites parent selection doesn't scale linearly with archive size.
+/// The bug: `let parents: Vec<&G> = self.archive.values()...collect()` allocates
+/// and iterates ALL archive entries just to select batch_size parents.
+#[test]
+fn test_map_elites_parent_selection_scales_sublinearly() {
+    use std::time::Instant;
+
+    // Create test genotype optimized for this test
+    #[derive(Clone, Serialize, Deserialize)]
+    struct SmallDNA(u8);
+
+    impl Genotype for SmallDNA {
+        fn mutate<R: Rng>(&mut self, rng: &mut R, rate: f32) {
+            if rng.random::<f32>() < rate {
+                self.0 = rng.random();
+            }
+        }
+        fn crossover<R: Rng>(&self, other: &Self, _rng: &mut R) -> Self {
+            SmallDNA((self.0 / 2).wrapping_add(other.0 / 2))
+        }
+    }
+
+    // Evaluator that spreads individuals across many bins
+    struct SpreadEval;
+    impl Evaluator<SmallDNA> for SpreadEval {
+        fn evaluate(&self, g: &SmallDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            let v = g.0 as f32 / 255.0;
+            (v, vec![v], vec![v, (v * 7.0) % 1.0])
+        }
+    }
+
+    // Create archive with moderate size (1000 items)
+    let mut engine = MapElites::<SmallDNA>::new(100, 0.3, 42);
+    engine.set_batch_size(32);
+
+    let initial: Vec<SmallDNA> = (0..=255).map(SmallDNA).collect();
+    engine.seed_population(initial, &SpreadEval);
+
+    // Warm up
+    for _ in 0..5 {
+        engine.step(&SpreadEval);
+    }
+
+    let archive_size = engine.archive_len();
+
+    // Time many steps
+    let iterations = 100;
+    let start = Instant::now();
+    for _ in 0..iterations {
+        engine.step(&SpreadEval);
+    }
+    let duration = start.elapsed();
+    let per_step_us = duration.as_micros() as f64 / iterations as f64;
+
+    // With O(1) or O(batch_size) selection, time should be bounded regardless of archive size.
+    // With O(N) selection, time grows with archive_len.
+    // batch_size=32 should complete in well under 1ms per step on modern hardware.
+    assert!(
+        per_step_us < 5000.0, // 5ms max per step
+        "MapElites step took {:.0}μs/step with archive_len={}. \
+         Parent selection should be O(batch_size), not O(archive_len).",
+        per_step_us,
+        archive_size
+    );
+}
+
+// ============================================================================
+// Performance Issue: Nsga2 deep cloning during crowding distance sorting
+// Review: src/algorithms/nsga2.rs lines 426-433
+// ============================================================================
+
+/// Test that Nsga2 doesn't deep clone genomes for sorting operations.
+#[test]
+fn test_nsga2_sorting_avoids_excessive_cloning() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+    use symbios_genetics::algorithms::nsga2::Nsga2;
+
+    static CLONE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Serialize, Deserialize)]
+    struct TrackedDNA {
+        data: Vec<f32>,
+    }
+
+    impl Clone for TrackedDNA {
+        fn clone(&self) -> Self {
+            CLONE_COUNT.fetch_add(1, Ordering::Relaxed);
+            TrackedDNA {
+                data: self.data.clone(),
+            }
+        }
+    }
+
+    impl Genotype for TrackedDNA {
+        fn mutate<R: Rng>(&mut self, rng: &mut R, rate: f32) {
+            if rng.random::<f32>() < rate {
+                for v in &mut self.data {
+                    *v += rng.random::<f32>() - 0.5;
+                }
+            }
+        }
+        fn crossover<R: Rng>(&self, other: &Self, rng: &mut R) -> Self {
+            let point = rng.random_range(0..self.data.len());
+            let mut data = self.data[..point].to_vec();
+            data.extend_from_slice(&other.data[point..]);
+            TrackedDNA { data }
+        }
+    }
+
+    struct MultiObjEval;
+    impl Evaluator<TrackedDNA> for MultiObjEval {
+        fn evaluate(&self, g: &TrackedDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            let sum: f32 = g.data.iter().sum();
+            let var: f32 = g
+                .data
+                .iter()
+                .map(|v| (v - sum / g.data.len() as f32).powi(2))
+                .sum();
+            (sum, vec![sum, -var], vec![])
+        }
+    }
+
+    let pop_size = 100;
+    let genome_size = 100; // 100 f32s per genome
+
+    let initial: Vec<TrackedDNA> = (0..pop_size)
+        .map(|i| TrackedDNA {
+            data: (0..genome_size)
+                .map(|j| (i * genome_size + j) as f32)
+                .collect(),
+        })
+        .collect();
+
+    let mut nsga = Nsga2::new(initial, 0.1, 42);
+
+    // Reset counter after construction
+    CLONE_COUNT.store(0, Ordering::Relaxed);
+
+    let start = Instant::now();
+    nsga.step(&MultiObjEval);
+    let duration = start.elapsed();
+
+    let clones = CLONE_COUNT.load(Ordering::Relaxed);
+
+    // Expected cloning behavior after fix:
+    // - offspring creation: pop_size clones (parents to children)
+    // - combined population: pop_size clones (self.population.clone())
+    // Sorting should NOT require additional clones of the full genome.
+    //
+    // Before fix: O(2*N) clones for SortWrapper creation
+    // After fix: O(N) clones for combined population only
+    let max_acceptable_clones = pop_size * 4; // Allow some buffer for implementation details
+
+    println!(
+        "Nsga2::step cloned {} times for pop_size={} (took {:?})",
+        clones, pop_size, duration
+    );
+
+    assert!(
+        clones <= max_acceptable_clones,
+        "Nsga2 performed {} clones for pop_size={}. \
+         Sorting should use indices, not clone data. Max acceptable: {}",
+        clones,
+        pop_size,
+        max_acceptable_clones
+    );
+}
+
+// ============================================================================
+// API Issue: SimpleGA elitism validation
+// Review: SimpleGA::new does not warn when elitism >= pop_size
+// ============================================================================
+
+#[test]
+fn test_simple_ga_elitism_clamping_maintains_progress() {
+    // When elitism >= pop_size, the algorithm should still make progress
+    // by clamping elitism to pop_size - 1
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let mut ga = SimpleGA::new(initial, 0.5, 100, 42); // elitism=100 > pop_size=10
+
+    // Should not stall - at least one offspring should be created
+    for _ in 0..10 {
+        ga.step(&TestEval);
+    }
+
+    // Verify evolution occurred (population should have changed)
+    let pop = ga.population();
+    assert_eq!(pop.len(), 10, "Population size should remain constant");
+
+    // Evolution should have made some progress
+    let best_fitness = pop
+        .iter()
+        .map(|p| p.fitness)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        best_fitness > 0.0,
+        "Evolution should progress even with over-specified elitism"
+    );
+}
+
+// ============================================================================
+// Efficiency Issue: MapElites map_to_index allocates Vec per call
+// Review: Optimize for high-throughput with reusable buffer
+// ============================================================================
+
+#[test]
+fn test_map_elites_map_to_index_into_buffer() {
+    let engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+
+    // Test buffer-based method produces same results as allocating version
+    let descriptor = vec![0.25, 0.75, 0.0, 1.0, 0.5];
+    let expected = engine.map_to_index(&descriptor);
+
+    let mut buffer = vec![0usize; 5];
+    engine.map_to_index_into(&descriptor, &mut buffer);
+
+    assert_eq!(
+        &buffer[..descriptor.len()],
+        &expected[..],
+        "map_to_index_into should produce same results as map_to_index"
+    );
+}
+
+#[test]
+fn test_map_elites_map_to_index_into_reuses_buffer() {
+    use std::time::Instant;
+
+    let engine = MapElites::<TestDNA>::new(100, 0.1, 42);
+    let iterations = 10000;
+
+    // Pre-allocate buffer
+    let mut buffer = vec![0usize; 2];
+
+    // Time buffer-based version
+    let start = Instant::now();
+    for i in 0..iterations {
+        let d = vec![(i as f32 / iterations as f32), 0.5];
+        engine.map_to_index_into(&d, &mut buffer);
+    }
+    let buffer_time = start.elapsed();
+
+    // Time allocating version
+    let start = Instant::now();
+    for i in 0..iterations {
+        let d = vec![(i as f32 / iterations as f32), 0.5];
+        let _ = engine.map_to_index(&d);
+    }
+    let alloc_time = start.elapsed();
+
+    println!(
+        "map_to_index_into: {:?}, map_to_index: {:?}",
+        buffer_time, alloc_time
+    );
+
+    // Verify final values match
+    let final_d = vec![0.5, 0.5];
+    engine.map_to_index_into(&final_d, &mut buffer);
+    let expected = engine.map_to_index(&final_d);
+    assert_eq!(buffer[0], expected[0]);
+    assert_eq!(buffer[1], expected[1]);
+}

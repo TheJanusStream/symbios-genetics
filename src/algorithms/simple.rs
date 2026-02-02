@@ -139,6 +139,18 @@ impl<G: Genotype> SimpleGA<G> {
     /// ```
     pub fn new(initial_pop: Vec<G>, mutation_rate: f32, elitism: usize, seed: u64) -> Self {
         let pop_size = initial_pop.len();
+
+        // Warn if elitism configuration may cause unexpected behavior
+        if elitism >= pop_size && pop_size > 0 {
+            eprintln!(
+                "Warning: SimpleGA elitism ({}) >= pop_size ({}). \
+                 Elitism will be clamped to {} to ensure evolution progresses.",
+                elitism,
+                pop_size,
+                pop_size.saturating_sub(1)
+            );
+        }
+
         let population = initial_pop
             .into_iter()
             .map(|g| Phenotype {
