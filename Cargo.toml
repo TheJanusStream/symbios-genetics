@@ -13,7 +13,7 @@ keywords = [
     "quality-diversity",
     "genetic-algorithms",
 ]
-categories = ["simulation", "algorithms", "biology"]
+categories = ["simulation", "algorithms"]
 
 [dependencies]
 rand = { version = "0.9", features = ["small_rng"] }
