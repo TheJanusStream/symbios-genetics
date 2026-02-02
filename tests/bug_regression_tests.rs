@@ -52,7 +52,7 @@ fn test_map_elites_population_visible_after_deserialization() {
 
     // Serialize and deserialize (using bincode since JSON doesn't support Vec keys)
     let serialized = bincode::serialize(&engine).expect("Serialization failed");
-    let deserialized: MapElites<SimpleDNA> =
+    let mut deserialized: MapElites<SimpleDNA> =
         bincode::deserialize(&serialized).expect("Deserialization failed");
 
     // BUG: population_cache is #[serde(skip)], so it's empty after deserialization
@@ -87,7 +87,7 @@ fn test_map_elites_population_visible_after_seeding() {
 
     // Verify we can see all the seeded individuals (up to archive collisions)
     assert!(
-        engine.archive.len() > 0,
+        engine.archive_len() > 0,
         "Archive should contain seeded individuals"
     );
 }
@@ -146,7 +146,7 @@ fn test_nsga2_handles_ragged_objectives_gracefully() {
 #[test]
 fn test_nsga2_fields_are_encapsulated() {
     let initial = vec![SimpleDNA(0.5), SimpleDNA(0.6)];
-    let engine = Nsga2::new(initial, 0.1, 42);
+    let mut engine = Nsga2::new(initial, 0.1, 42);
 
     // Fields should now be private and only accessible via getters
     // This test verifies the API is encapsulated
@@ -211,12 +211,15 @@ fn test_nsga2_dominates_detects_length_mismatch() {
     let long_dominates_short = Nsga2::<SimpleDNA>::dominates(&long, &short);
 
     // With the bug: short_dominates_long = true (zip truncates, 1.0 > 0.5 in both)
-    // Correct behavior: should be false or panic, because we can't properly compare
+    // Correct behavior: BOTH should be false because we can't properly compare
 
-    // At minimum, both should be false (incomparable due to length mismatch)
+    // Strict assertion: neither should dominate when objective counts differ
     assert!(
-        !short_dominates_long || !long_dominates_short,
-        "Dominance comparison with mismatched objective counts should be handled properly. \
-         Currently zip() silently truncates, leading to incorrect dominance conclusions."
+        !short_dominates_long,
+        "short should not dominate long when objective counts differ"
+    );
+    assert!(
+        !long_dominates_short,
+        "long should not dominate short when objective counts differ"
     );
 }

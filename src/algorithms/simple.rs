@@ -75,8 +75,9 @@ impl<G: Genotype> Evolver<G> for SimpleGA<G> {
         self.population
             .sort_by(|a, b| cmp_f32_nan_last(b.fitness, a.fitness));
 
-        // Clamp elitism to population size to prevent slice overflow
-        let effective_elitism = self.elitism.min(self.pop_size);
+        // Clamp elitism to pop_size - 1 to ensure at least one offspring is generated
+        // This prevents evolution from halting when elitism >= pop_size
+        let effective_elitism = self.elitism.min(self.pop_size.saturating_sub(1));
         let mut next_gen = self.population[..effective_elitism].to_vec();
 
         // Tournament selection with graceful handling of small populations
@@ -103,7 +104,7 @@ impl<G: Genotype> Evolver<G> for SimpleGA<G> {
         }
         self.population = next_gen;
     }
-    fn population(&self) -> &[Phenotype<G>] {
+    fn population(&mut self) -> &[Phenotype<G>] {
         &self.population
     }
 }

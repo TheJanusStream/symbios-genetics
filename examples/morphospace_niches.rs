@@ -1,8 +1,6 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use symbios_genetics::{
-    Evaluator, Evolver, Genotype, Phenotype, algorithms::map_elites::MapElites,
-};
+use symbios_genetics::{Evaluator, Evolver, Genotype, algorithms::map_elites::MapElites};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct ShapeDNA {
@@ -54,30 +52,17 @@ fn main() {
     let resolution = 10; // 10x10 grid = 100 niches
 
     let mut engine = MapElites::new(resolution, mutation_rate, 42);
-    engine.batch_size = 50;
+    engine.set_batch_size(50);
     let eval = ShapeEvaluator;
 
-    // 1. Initial Seeding: Drop a few random shapes into the void
-    for _ in 0..5 {
-        let dna = ShapeDNA {
+    // 1. Initial Seeding: Use seed_population for proper encapsulation
+    let initial_seeds: Vec<ShapeDNA> = (0..5)
+        .map(|_| ShapeDNA {
             h: rng.random_range(1.0..5.0),
             w: rng.random_range(1.0..5.0),
-        };
-        let (f, obj, desc) = eval.evaluate(&dna);
-        let idx = desc
-            .iter()
-            .map(|&v| (v * (resolution - 1) as f32) as usize)
-            .collect::<Vec<_>>();
-        engine.archive.insert(
-            idx,
-            Phenotype {
-                genotype: dna,
-                fitness: f,
-                objectives: obj,
-                descriptor: desc,
-            },
-        );
-    }
+        })
+        .collect();
+    engine.seed_population(initial_seeds, &eval);
 
     println!("Mapping 10x10 Morphospace (100 niches)...");
 
@@ -90,7 +75,7 @@ fn main() {
             println!(
                 "Generation {}: Archive Coverage: {}/{}",
                 generation,
-                engine.archive.len(),
+                engine.archive_len(),
                 resolution * resolution
             );
         }
@@ -104,7 +89,7 @@ fn main() {
         print!("H {} |", row);
         for col in 0..resolution {
             let key = vec![row, col];
-            if let Some(elite) = engine.archive.get(&key) {
+            if let Some(elite) = engine.archive_get(&key) {
                 print!("{:>4.0} ", elite.fitness);
             } else {
                 print!("  .  ");
@@ -114,12 +99,8 @@ fn main() {
     }
 
     println!("\nFinal Stats:");
-    println!("Total Elites Found: {}", engine.archive.len());
-    let best_overall = engine
-        .archive
-        .values()
-        .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
-        .unwrap();
+    println!("Total Elites Found: {}", engine.archive_len());
+    let best_overall = engine.best_by_fitness().unwrap();
     println!(
         "Overall Area King: H:{:.2} W:{:.2} (Area: {:.2})",
         best_overall.genotype.h, best_overall.genotype.w, best_overall.fitness

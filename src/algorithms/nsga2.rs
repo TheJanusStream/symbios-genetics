@@ -1,5 +1,5 @@
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
-use rand::prelude::{IndexedRandom, SeedableRng};
+use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64; // Specific, serializable generator
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -11,6 +11,10 @@ use rayon::prelude::*;
 #[serde(bound = "G: Genotype")]
 pub struct Nsga2<G: Genotype> {
     population: Vec<Phenotype<G>>,
+    /// Stored rank for each individual (lower is better)
+    ranks: Vec<usize>,
+    /// Stored crowding distance for each individual (higher is better)
+    crowding_distances: Vec<f32>,
     pop_size: usize,
     mutation_rate: f32,
     rng: Pcg64,
@@ -40,7 +44,7 @@ pub struct SortWrapper<G: Genotype> {
 impl<G: Genotype> Nsga2<G> {
     pub fn new(initial_pop: Vec<G>, mutation_rate: f32, seed: u64) -> Self {
         let pop_size = initial_pop.len();
-        let population = initial_pop
+        let population: Vec<_> = initial_pop
             .into_iter()
             .map(|g| Phenotype {
                 genotype: g,
@@ -50,11 +54,40 @@ impl<G: Genotype> Nsga2<G> {
             })
             .collect();
 
+        // Initialize with default ranks (all equal) and infinite crowding distance
+        let ranks = vec![0; population.len()];
+        let crowding_distances = vec![f32::INFINITY; population.len()];
+
         Self {
             population,
+            ranks,
+            crowding_distances,
             pop_size,
             mutation_rate,
             rng: Pcg64::seed_from_u64(seed),
+        }
+    }
+
+    /// Binary tournament selection: picks 2 random individuals and returns
+    /// the one with better rank (lower), or better crowding distance (higher) if tied.
+    fn binary_tournament(&mut self) -> usize {
+        use rand::Rng;
+        let n = self.population.len();
+        let i = self.rng.random_range(0..n);
+        let j = self.rng.random_range(0..n);
+
+        // Compare by rank first (lower is better)
+        match self.ranks[i].cmp(&self.ranks[j]) {
+            Ordering::Less => i,
+            Ordering::Greater => j,
+            Ordering::Equal => {
+                // Tie-break by crowding distance (higher is better)
+                if self.crowding_distances[i] >= self.crowding_distances[j] {
+                    i
+                } else {
+                    j
+                }
+            }
         }
     }
 
@@ -109,19 +142,36 @@ impl<G: Genotype> Nsga2<G> {
             return;
         }
 
-        // Use minimum objective count to handle ragged objectives safely
-        let obj_count = front
+        // Check for consistent objective counts
+        let min_obj = front
             .iter()
             .map(|w| w.pheno.objectives.len())
             .min()
             .unwrap_or(0);
+        let max_obj = front
+            .iter()
+            .map(|w| w.pheno.objectives.len())
+            .max()
+            .unwrap_or(0);
 
-        if obj_count == 0 {
+        if min_obj == 0 {
+            // No objectives: all get infinite distance (equally preferred)
             for ind in front {
                 ind.distance = f32::INFINITY;
             }
             return;
         }
+
+        if min_obj != max_obj {
+            // Ragged objectives: individuals are incomparable for crowding
+            // Give all infinite distance so selection falls back to rank only
+            for ind in front {
+                ind.distance = f32::INFINITY;
+            }
+            return;
+        }
+
+        let obj_count = min_obj;
 
         for m in 0..obj_count {
             front.sort_by(|a, b| {
@@ -168,16 +218,13 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
             return;
         }
 
+        // Generate offspring using binary tournament selection
         let mut offspring = vec![];
         while offspring.len() < self.pop_size {
-            let p1 = self
-                .population
-                .choose(&mut self.rng)
-                .expect("population verified non-empty");
-            let p2 = self
-                .population
-                .choose(&mut self.rng)
-                .expect("population verified non-empty");
+            let idx1 = self.binary_tournament();
+            let idx2 = self.binary_tournament();
+            let p1 = &self.population[idx1];
+            let p2 = &self.population[idx2];
             let mut child_dna = p1.genotype.crossover(&p2.genotype, &mut self.rng);
             child_dna.mutate(&mut self.rng, self.mutation_rate);
             offspring.push(Phenotype {
@@ -234,9 +281,13 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
                 break;
             }
         }
+
+        // Store ranks and crowding distances for next generation's tournament selection
+        self.ranks = next_gen.iter().map(|w| w.rank).collect();
+        self.crowding_distances = next_gen.iter().map(|w| w.distance).collect();
         self.population = next_gen.into_iter().map(|w| w.pheno).collect();
     }
-    fn population(&self) -> &[Phenotype<G>] {
+    fn population(&mut self) -> &[Phenotype<G>] {
         &self.population
     }
 }

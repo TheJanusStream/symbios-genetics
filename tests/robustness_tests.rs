@@ -212,9 +212,9 @@ fn test_map_elites_default_batch_size_is_reasonable() {
     // batch_size of 1 defeats the purpose of parallel evaluation
     // It should default to something reasonable (e.g., 32, 64, or num_cpus)
     assert!(
-        me.batch_size > 1,
+        me.batch_size() > 1,
         "Default batch_size should be > 1 for effective parallelism, got {}",
-        me.batch_size
+        me.batch_size()
     );
 }
 
@@ -223,7 +223,7 @@ fn test_map_elites_large_archive_performance() {
     use std::time::Instant;
 
     let mut me = MapElites::<TestDNA>::new(100, 0.1, 42);
-    me.batch_size = 32;
+    me.set_batch_size(32);
 
     struct FastEval;
     impl Evaluator<TestDNA> for FastEval {

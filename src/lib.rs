@@ -21,7 +21,7 @@ pub trait Evaluator<G: Genotype>: Send + Sync {
 
 pub trait Evolver<G: Genotype> {
     fn step<E: Evaluator<G>>(&mut self, evaluator: &E);
-    fn population(&self) -> &[Phenotype<G>];
+    fn population(&mut self) -> &[Phenotype<G>];
 }
 
 pub mod algorithms {

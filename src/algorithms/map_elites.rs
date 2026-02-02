@@ -1,5 +1,5 @@
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
-use rand::prelude::{IndexedRandom, SeedableRng};
+use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64; // Specific, serializable generator
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,11 +19,12 @@ struct MapElitesData<G: Genotype> {
 }
 
 pub struct MapElites<G: Genotype> {
-    pub archive: HashMap<Vec<usize>, Phenotype<G>>,
+    archive: HashMap<Vec<usize>, Phenotype<G>>,
     population_cache: Vec<Phenotype<G>>,
-    pub resolution: usize,
-    pub mutation_rate: f32,
-    pub batch_size: usize,
+    cache_valid: bool,
+    resolution: usize,
+    mutation_rate: f32,
+    batch_size: usize,
     rng: Pcg64,
 }
 
@@ -53,6 +54,7 @@ impl<'de, G: Genotype> Deserialize<'de> for MapElites<G> {
         Ok(Self {
             archive: data.archive,
             population_cache,
+            cache_valid: true,
             resolution: data.resolution,
             mutation_rate: data.mutation_rate,
             batch_size: data.batch_size,
@@ -66,11 +68,56 @@ impl<G: Genotype> MapElites<G> {
         Self {
             archive: HashMap::new(),
             population_cache: Vec::new(),
+            cache_valid: true,
             resolution,
             mutation_rate,
             batch_size: 64, // Reasonable default for parallel evaluation
             rng: Pcg64::seed_from_u64(seed),
         }
+    }
+
+    pub fn resolution(&self) -> usize {
+        self.resolution
+    }
+
+    pub fn mutation_rate(&self) -> f32 {
+        self.mutation_rate
+    }
+
+    pub fn set_mutation_rate(&mut self, rate: f32) {
+        self.mutation_rate = rate;
+    }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    pub fn set_batch_size(&mut self, size: usize) {
+        self.batch_size = size;
+    }
+
+    pub fn archive_len(&self) -> usize {
+        self.archive.len()
+    }
+
+    pub fn archive_get(&self, key: &[usize]) -> Option<&Phenotype<G>> {
+        self.archive.get(key)
+    }
+
+    pub fn archive_keys(&self) -> impl Iterator<Item = &Vec<usize>> {
+        self.archive.keys()
+    }
+
+    pub fn archive_iter(&self) -> impl Iterator<Item = (&Vec<usize>, &Phenotype<G>)> {
+        self.archive.iter()
+    }
+
+    pub fn best_by_fitness(&self) -> Option<&Phenotype<G>> {
+        self.archive.values().max_by(|a, b| {
+            a.fitness
+                .partial_cmp(&b.fitness)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     pub fn seed_population<E: Evaluator<G>>(&mut self, initial: Vec<G>, evaluator: &E) {
@@ -87,53 +134,69 @@ impl<G: Genotype> MapElites<G> {
                 },
             );
         }
-        self.rebuild_cache();
+        self.cache_valid = false;
     }
 
-    fn rebuild_cache(&mut self) {
-        self.population_cache = self.archive.values().cloned().collect();
+    fn ensure_cache_valid(&mut self) {
+        if !self.cache_valid {
+            self.population_cache = self.archive.values().cloned().collect();
+            self.cache_valid = true;
+        }
     }
 
     pub fn map_to_index(&self, descriptor: &[f32]) -> Vec<usize> {
         descriptor
             .iter()
-            .map(|&v| (v.clamp(0.0, 1.0) * (self.resolution - 1) as f32).round() as usize)
+            .map(|&v| {
+                // Use floor() for uniform bin sizes, clamp index to valid range
+                let scaled = v.clamp(0.0, 1.0) * self.resolution as f32;
+                (scaled.floor() as usize).min(self.resolution - 1)
+            })
             .collect()
     }
 }
 
 impl<G: Genotype> Evolver<G> for MapElites<G> {
     fn step<E: Evaluator<G>>(&mut self, evaluator: &E) {
+        use rand::Rng;
+
         if self.archive.is_empty() {
             return;
         }
 
         // Collect genotypes directly instead of cloning Vec keys
-        // This avoids O(n) heap allocations per step for large archives
         let parents: Vec<&G> = self.archive.values().map(|p| &p.genotype).collect();
+        let mutation_rate = self.mutation_rate;
 
-        let candidates: Vec<G> = (0..self.batch_size)
+        // Pre-select parents and generate RNG seeds serially (RNG needs mutable access)
+        let selections: Vec<(usize, u64)> = (0..self.batch_size)
             .map(|_| {
-                let parent = *parents.choose(&mut self.rng).unwrap();
-                let mut dna = parent.clone();
-                dna.mutate(&mut self.rng, self.mutation_rate);
-                dna
+                let parent_idx = self.rng.random_range(0..parents.len());
+                let seed = self.rng.random::<u64>();
+                (parent_idx, seed)
             })
             .collect();
 
+        // Parallel: clone parents, mutate with per-task RNG, and evaluate
         #[cfg(feature = "parallel")]
-        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = candidates
+        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = selections
             .into_par_iter()
-            .map(|dna| {
+            .map(|(parent_idx, seed)| {
+                let mut rng = Pcg64::seed_from_u64(seed);
+                let mut dna = parents[parent_idx].clone();
+                dna.mutate(&mut rng, mutation_rate);
                 let (f, obj, desc) = evaluator.evaluate(&dna);
                 (dna, f, obj, desc)
             })
             .collect();
 
         #[cfg(not(feature = "parallel"))]
-        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = candidates
+        let results: Vec<(G, f32, Vec<f32>, Vec<f32>)> = selections
             .into_iter()
-            .map(|dna| {
+            .map(|(parent_idx, seed)| {
+                let mut rng = Pcg64::seed_from_u64(seed);
+                let mut dna = parents[parent_idx].clone();
+                dna.mutate(&mut rng, mutation_rate);
                 let (f, obj, desc) = evaluator.evaluate(&dna);
                 (dna, f, obj, desc)
             })
@@ -153,12 +216,13 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
                 .is_none_or(|e| new_pheno.fitness > e.fitness)
             {
                 self.archive.insert(idx, new_pheno);
+                self.cache_valid = false;
             }
         }
-        self.rebuild_cache();
     }
 
-    fn population(&self) -> &[Phenotype<G>] {
+    fn population(&mut self) -> &[Phenotype<G>] {
+        self.ensure_cache_valid();
         &self.population_cache
     }
 }
