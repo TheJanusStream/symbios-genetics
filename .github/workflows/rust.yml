@@ -29,9 +29,7 @@ jobs:
 
       - name: Verify Examples
         run: |
-          cargo run --example rectangle_challenge
           cargo run --features parallel --example rectangle_challenge
-          cargo run --example bitvec_matching
           cargo run --features parallel --example bitvec_matching
-          cargo run --example string_matching
           cargo run --features parallel --example string_matching
+          cargo run --features parallel --example morphospace_niches
