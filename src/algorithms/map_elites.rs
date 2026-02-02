@@ -158,7 +158,38 @@ impl<'de, G: Genotype> Deserialize<'de> for MapElites<G> {
     where
         D: serde::Deserializer<'de>,
     {
+        use serde::de::Error;
+
         let data = MapElitesData::<G>::deserialize(deserializer)?;
+
+        // Validate resolution to prevent division/underflow panic in map_single_dimension
+        if data.resolution == 0 {
+            return Err(D::Error::custom("resolution must be greater than 0"));
+        }
+
+        // Validate batch_size to prevent empty offspring generation
+        if data.batch_size == 0 {
+            return Err(D::Error::custom("batch_size must be greater than 0"));
+        }
+
+        // Validate archive_keys_vec integrity: each key must exist in archive
+        // This prevents panic from unwrap() during parent selection in step()
+        for key in &data.archive_keys_vec {
+            if !data.archive.contains_key(key) {
+                return Err(D::Error::custom(
+                    "archive_keys_vec contains key not present in archive",
+                ));
+            }
+        }
+
+        // Validate archive integrity: each archive key should be in archive_keys_vec
+        // This ensures the key vec is complete for random sampling
+        if data.archive.len() != data.archive_keys_vec.len() {
+            return Err(D::Error::custom(
+                "archive_keys_vec length does not match archive size",
+            ));
+        }
+
         let population_cache: Vec<Phenotype<G>> = data.archive.values().cloned().collect();
         Ok(Self {
             archive: data.archive,
@@ -468,20 +499,30 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
             })
             .collect();
 
+        // Reuse a single buffer for index mapping to avoid per-offspring allocations
+        let mut idx_buffer: Vec<usize> = Vec::new();
+
         for (dna, f, obj, desc) in results {
-            let idx = self.map_to_index(&desc);
-            let new_pheno = Phenotype {
-                genotype: dna,
-                fitness: f,
-                objectives: obj,
-                descriptor: desc,
-            };
-            if self
+            // Resize buffer to match descriptor dimensions, reusing capacity
+            idx_buffer.resize(desc.len(), 0);
+            self.map_to_index_into(&desc, &mut idx_buffer);
+
+            // Check if offspring should enter archive before cloning the key
+            let dominated = self
                 .archive
-                .get(&idx)
-                .is_none_or(|e| new_pheno.fitness > e.fitness)
-            {
-                let is_new_key = !self.archive.contains_key(&idx);
+                .get(&idx_buffer)
+                .is_some_and(|e| f <= e.fitness);
+
+            if !dominated {
+                let new_pheno = Phenotype {
+                    genotype: dna,
+                    fitness: f,
+                    objectives: obj,
+                    descriptor: desc,
+                };
+                let is_new_key = !self.archive.contains_key(&idx_buffer);
+                // Only allocate key Vec when actually inserting
+                let idx = idx_buffer.clone();
                 self.archive.insert(idx.clone(), new_pheno);
                 if is_new_key {
                     self.archive_keys_vec.push(idx);

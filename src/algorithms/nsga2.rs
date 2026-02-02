@@ -155,6 +155,13 @@ impl<G: Genotype> Nsga2<G> {
     /// * `mutation_rate` - Probability of mutation, typically in `[0.0, 1.0]`
     /// * `seed` - RNG seed for deterministic execution
     ///
+    /// # Note
+    ///
+    /// The initial population is created with placeholder fitness values.
+    /// Ranks and crowding distances are calculated based on the initial
+    /// (unevaluated) state to ensure consistency. Call `step()` with an
+    /// evaluator to compute meaningful ranks based on actual objectives.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -173,8 +180,9 @@ impl<G: Genotype> Nsga2<G> {
             })
             .collect();
 
-        let ranks = vec![0; population.len()];
-        let crowding_distances = vec![f32::INFINITY; population.len()];
+        // Calculate initial ranks and crowding distances for consistency
+        // With empty objectives, all individuals are non-dominated (rank 0)
+        let (ranks, crowding_distances) = Self::calculate_ranks_and_distances(&population);
 
         Self {
             population,
@@ -184,6 +192,40 @@ impl<G: Genotype> Nsga2<G> {
             mutation_rate,
             rng: Pcg64::seed_from_u64(seed),
         }
+    }
+
+    /// Calculates ranks and crowding distances for a population.
+    ///
+    /// This is used both during initialization and could be used to
+    /// inspect the current Pareto structure without running a full step.
+    fn calculate_ranks_and_distances(population: &[Phenotype<G>]) -> (Vec<usize>, Vec<f32>) {
+        if population.is_empty() {
+            return (vec![], vec![]);
+        }
+
+        let fronts = Self::fast_non_dominated_sort(population);
+        let mut ranks = vec![0; population.len()];
+        let mut crowding_distances = vec![0.0; population.len()];
+
+        for (rank, indices) in fronts.iter().enumerate() {
+            let mut front_wrappers: Vec<_> = indices
+                .iter()
+                .map(|&i| SortWrapper {
+                    index: i,
+                    rank,
+                    distance: 0.0,
+                })
+                .collect();
+
+            Self::calculate_crowding_distance(&mut front_wrappers, population);
+
+            for wrapper in front_wrappers {
+                ranks[wrapper.index] = rank;
+                crowding_distances[wrapper.index] = wrapper.distance;
+            }
+        }
+
+        (ranks, crowding_distances)
     }
 
     /// Binary tournament selection.

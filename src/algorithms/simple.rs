@@ -180,8 +180,20 @@ impl<G: Genotype> SimpleGA<G> {
         self.mutation_rate
     }
 
-    /// Returns the elitism count.
+    /// Returns the effective elitism count used during evolution.
+    ///
+    /// This is clamped to `pop_size - 1` to ensure at least one offspring
+    /// is generated each generation. Use [`elitism_configured`] to get
+    /// the originally configured value.
     pub fn elitism(&self) -> usize {
+        self.elitism.min(self.pop_size.saturating_sub(1))
+    }
+
+    /// Returns the originally configured elitism value.
+    ///
+    /// Note: This may differ from the effective value returned by [`elitism`]
+    /// if the configured value exceeds `pop_size - 1`.
+    pub fn elitism_configured(&self) -> usize {
         self.elitism
     }
 }

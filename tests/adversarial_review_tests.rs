@@ -553,3 +553,291 @@ fn test_map_elites_map_to_index_into_reuses_buffer() {
     assert_eq!(buffer[0], expected[0]);
     assert_eq!(buffer[1], expected[1]);
 }
+
+// ============================================================================
+// Issue #36: MapElites Deserialization Time Bombs (DoS via panic injection)
+// Review: Critical - resolution=0 or archive key desync causes panics
+// ============================================================================
+
+use rand::SeedableRng;
+use rand_pcg::Pcg64;
+use std::collections::BTreeMap;
+use symbios_genetics::Phenotype;
+
+/// Mirror of internal MapElitesData for testing malicious deserialization.
+/// This allows us to craft invalid serialized states.
+#[derive(Serialize, Deserialize)]
+struct MaliciousMapElitesData {
+    archive: BTreeMap<Vec<usize>, Phenotype<TestDNA>>,
+    archive_keys_vec: Vec<Vec<usize>>,
+    resolution: usize,
+    mutation_rate: f32,
+    batch_size: usize,
+    rng: Pcg64,
+}
+
+/// Test that deserializing MapElites with resolution=0 fails gracefully.
+#[test]
+fn test_map_elites_deserialize_rejects_zero_resolution() {
+    // Create valid phenotype
+    let pheno = Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![0.5],
+        descriptor: vec![0.5],
+    };
+
+    let mut archive = BTreeMap::new();
+    archive.insert(vec![5usize], pheno);
+
+    // Create malicious data with resolution=0
+    let malicious_data = MaliciousMapElitesData {
+        archive,
+        archive_keys_vec: vec![vec![5]],
+        resolution: 0, // Invalid!
+        mutation_rate: 0.1,
+        batch_size: 64,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious_data).unwrap();
+    let result: Result<MapElites<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    match result {
+        Ok(_) => panic!(
+            "Deserializing MapElites with resolution=0 should fail, not panic later.\n\
+             This prevents DoS via division/underflow in map_single_dimension."
+        ),
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("resolution must be greater than 0"),
+                "Error should mention resolution validation. Got: {}",
+                err_msg
+            );
+        }
+    }
+}
+
+/// Test that deserializing MapElites with batch_size=0 fails gracefully.
+#[test]
+fn test_map_elites_deserialize_rejects_zero_batch_size() {
+    let pheno = Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![0.5],
+        descriptor: vec![0.5],
+    };
+
+    let mut archive = BTreeMap::new();
+    archive.insert(vec![5usize], pheno);
+
+    let malicious_data = MaliciousMapElitesData {
+        archive,
+        archive_keys_vec: vec![vec![5]],
+        resolution: 10,
+        mutation_rate: 0.1,
+        batch_size: 0, // Invalid!
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious_data).unwrap();
+    let result: Result<MapElites<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing MapElites with batch_size=0 should fail"
+    );
+}
+
+/// Test that deserializing MapElites with desynced archive_keys_vec fails gracefully.
+#[test]
+fn test_map_elites_deserialize_rejects_archive_key_desync() {
+    let pheno = Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![0.5],
+        descriptor: vec![0.5],
+    };
+
+    let mut archive = BTreeMap::new();
+    archive.insert(vec![5usize], pheno);
+
+    // archive_keys_vec contains a key [99] that doesn't exist in archive
+    let malicious_data = MaliciousMapElitesData {
+        archive,
+        archive_keys_vec: vec![vec![5], vec![99]], // [99] doesn't exist in archive!
+        resolution: 10,
+        mutation_rate: 0.1,
+        batch_size: 64,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious_data).unwrap();
+    let result: Result<MapElites<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing MapElites with desynced archive_keys_vec should fail.\n\
+         This prevents unwrap() panic during parent selection in step()."
+    );
+}
+
+/// Test that deserializing MapElites with incomplete archive_keys_vec fails.
+#[test]
+fn test_map_elites_deserialize_rejects_incomplete_keys_vec() {
+    let pheno1 = Phenotype {
+        genotype: TestDNA(0.1),
+        fitness: 0.1,
+        objectives: vec![0.1],
+        descriptor: vec![0.1],
+    };
+    let pheno2 = Phenotype {
+        genotype: TestDNA(0.9),
+        fitness: 0.9,
+        objectives: vec![0.9],
+        descriptor: vec![0.9],
+    };
+
+    let mut archive = BTreeMap::new();
+    archive.insert(vec![1usize], pheno1);
+    archive.insert(vec![9usize], pheno2);
+
+    // archive_keys_vec is missing key [9] - only has [1]
+    let malicious_data = MaliciousMapElitesData {
+        archive,
+        archive_keys_vec: vec![vec![1]], // Missing [9]!
+        resolution: 10,
+        mutation_rate: 0.1,
+        batch_size: 64,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious_data).unwrap();
+    let result: Result<MapElites<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing MapElites with incomplete archive_keys_vec should fail"
+    );
+}
+
+// ============================================================================
+// Issue #38: SimpleGA elitism() getter returns invalid stored value
+// Review: Low - elitism() lies about runtime behavior
+// ============================================================================
+
+/// Test that elitism() returns the effective clamped value, not the configured invalid value.
+#[test]
+fn test_simple_ga_elitism_returns_effective_value() {
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let ga = SimpleGA::new(initial, 0.1, 100, 42); // elitism=100 > pop_size=10
+
+    // elitism() should return effective value (clamped to pop_size - 1 = 9)
+    let effective = ga.elitism();
+    assert_eq!(
+        effective, 9,
+        "elitism() should return effective clamped value (9), not configured value (100)"
+    );
+
+    // elitism_configured() should return the original configured value
+    let configured = ga.elitism_configured();
+    assert_eq!(
+        configured, 100,
+        "elitism_configured() should return the originally configured value"
+    );
+}
+
+/// Test that elitism() returns correct value when configured value is valid.
+#[test]
+fn test_simple_ga_elitism_returns_configured_when_valid() {
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let ga = SimpleGA::new(initial, 0.1, 3, 42); // elitism=3 < pop_size=10
+
+    // Both should return the same value when configured value is valid
+    assert_eq!(ga.elitism(), 3);
+    assert_eq!(ga.elitism_configured(), 3);
+}
+
+// ============================================================================
+// Issue #39: NSGA2 uninitialized population state
+// Review: Minor - ranks/distances not calculated on creation
+// ============================================================================
+
+/// Test that NSGA2 calculates initial ranks and crowding distances on creation.
+#[test]
+fn test_nsga2_initial_ranks_calculated() {
+    use symbios_genetics::algorithms::nsga2::Nsga2;
+
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let nsga = Nsga2::new(initial, 0.1, 42);
+
+    // Serialize immediately after creation (before any step()) using bincode
+    let serialized = bincode::serialize(&nsga).expect("Serialization failed");
+
+    // Deserialize and check it works (no corrupted state)
+    let deserialized: Nsga2<TestDNA> =
+        bincode::deserialize(&serialized).expect("Deserialization failed");
+
+    // Population should be intact
+    assert_eq!(deserialized.pop_size(), 10);
+
+    // The deserialized instance should work correctly
+    let mut nsga2 = deserialized;
+    nsga2.step(&TestEval); // Should not panic due to invalid ranks/distances
+}
+
+/// Test that NSGA2 binary tournament works correctly after construction.
+#[test]
+fn test_nsga2_binary_tournament_works_after_new() {
+    use symbios_genetics::algorithms::nsga2::Nsga2;
+
+    // With initial (unevaluated) population, all individuals have empty objectives
+    // This means all are non-dominated (rank 0) with infinite crowding distance
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let mut nsga = Nsga2::new(initial, 0.1, 42);
+
+    // step() should work correctly - it uses binary_tournament which relies on
+    // ranks and crowding_distances being properly initialized
+    nsga.step(&TestEval);
+
+    // If we get here without panic, the initial state was valid
+    assert_eq!(nsga.pop_size(), 10);
+}
+
+// ============================================================================
+// Issue #37: MapElites step() allocation hypocrisy
+// Review: Moderate - uses map_to_index instead of map_to_index_into
+// ============================================================================
+
+/// Test that MapElites step() works correctly with the optimized implementation.
+#[test]
+fn test_map_elites_step_uses_buffer_optimization() {
+    let mut engine = MapElites::<TestDNA>::new(10, 0.3, 42);
+    engine.set_batch_size(32);
+
+    // Seed population
+    let initial: Vec<TestDNA> = (0..20).map(|i| TestDNA(i as f32 / 20.0)).collect();
+    engine.seed_population(initial, &TestEval);
+
+    let initial_len = engine.archive_len();
+
+    // Run multiple steps - should not panic and should make progress
+    for _ in 0..50 {
+        engine.step(&TestEval);
+    }
+
+    // Archive should have grown or at least maintained
+    assert!(
+        engine.archive_len() >= initial_len,
+        "Archive should maintain or grow during evolution"
+    );
+
+    // Verify archive integrity - all elites should be accessible
+    for key in engine.archive_keys() {
+        assert!(
+            engine.archive_get(key).is_some(),
+            "All archive keys should map to valid elites"
+        );
+    }
+}
