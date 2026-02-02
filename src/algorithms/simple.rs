@@ -35,6 +35,9 @@
 //!         }
 //!     }
 //!     fn crossover<R: Rng>(&self, other: &Self, rng: &mut R) -> Self {
+//!         // SAFETY: This example assumes non-empty genomes. For production code,
+//!         // handle empty genomes gracefully to avoid panic from empty range:
+//!         //   if self.0.is_empty() { return other.clone(); }
 //!         let point = rng.random_range(0..self.0.len());
 //!         let mut child = self.0[..point].to_vec();
 //!         child.extend_from_slice(&other.0[point..]);

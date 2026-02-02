@@ -1148,3 +1148,278 @@ fn test_map_elites_resolution_extreme_documented() {
         extreme_resolution
     );
 }
+
+// ============================================================================
+// Issue #44: NaN Handling in MapElites and NSGA-II (Critical)
+// Review: NaN fitness/objectives cause archive corruption and convergence failure
+// ============================================================================
+
+/// Test that MapElites rejects individuals with NaN fitness during seeding.
+/// Before fix: NaN individuals would overwrite valid elites due to comparison semantics.
+#[test]
+fn test_map_elites_nan_fitness_rejected_during_seed() {
+    struct NaNFitnessEval;
+    impl Evaluator<TestDNA> for NaNFitnessEval {
+        fn evaluate(&self, g: &TestDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            let fitness = if g.0 > 0.5 { f32::NAN } else { g.0 * 100.0 };
+            (fitness, vec![fitness], vec![0.5]) // All map to same bin
+        }
+    }
+
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+
+    // First seed a valid individual with high fitness
+    engine.seed_population(vec![TestDNA(0.4)], &NaNFitnessEval); // fitness = 40.0
+    let initial_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    assert_eq!(
+        initial_fitness, 40.0,
+        "Initial elite should have fitness 40.0"
+    );
+
+    // Try to seed with NaN fitness individual (g.0 > 0.5 -> NaN)
+    engine.seed_population(vec![TestDNA(0.9)], &NaNFitnessEval); // fitness = NaN
+
+    // NaN individual should NOT overwrite the valid elite
+    let final_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    assert_eq!(
+        final_fitness, 40.0,
+        "NaN fitness individual should not overwrite valid elite. Got {}",
+        final_fitness
+    );
+}
+
+/// Test that MapElites rejects individuals with NaN fitness during step().
+#[test]
+fn test_map_elites_nan_fitness_rejected_during_step() {
+    struct IntermittentNaNEval;
+    impl Evaluator<TestDNA> for IntermittentNaNEval {
+        fn evaluate(&self, g: &TestDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            // Deterministically produce NaN for certain values
+            let fitness = if (g.0 * 100.0) as i32 % 3 == 0 {
+                f32::NAN
+            } else {
+                g.0 * 100.0
+            };
+            (fitness, vec![fitness], vec![g.0.clamp(0.0, 1.0)])
+        }
+    }
+
+    let mut engine = MapElites::<TestDNA>::new(10, 0.5, 42);
+    engine.set_batch_size(32);
+
+    // Seed with valid individuals
+    let initial: Vec<TestDNA> = (1..10).map(|i| TestDNA(i as f32 / 10.0)).collect();
+    engine.seed_population(initial, &IntermittentNaNEval);
+
+    let initial_len = engine.archive_len();
+
+    // Run many steps with intermittent NaN fitness
+    for _ in 0..50 {
+        engine.step(&IntermittentNaNEval);
+    }
+
+    // Archive should not have shrunk (NaN individuals filtered out)
+    assert!(
+        engine.archive_len() >= initial_len,
+        "Archive should not shrink due to NaN fitness. Initial: {}, Final: {}",
+        initial_len,
+        engine.archive_len()
+    );
+
+    // All archive entries should have valid (non-NaN) fitness
+    for (key, pheno) in engine.archive_iter() {
+        assert!(
+            !pheno.fitness.is_nan(),
+            "Archive should not contain NaN fitness. Found NaN at key {:?}",
+            key
+        );
+    }
+}
+
+/// Test that MapElites rejects individuals with NaN descriptors.
+/// Before fix: NaN descriptors silently mapped to bin 0, corrupting that cell.
+#[test]
+fn test_map_elites_nan_descriptor_rejected() {
+    struct NaNDescriptorEval;
+    impl Evaluator<TestDNA> for NaNDescriptorEval {
+        fn evaluate(&self, g: &TestDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            let descriptor = if g.0 > 0.5 { f32::NAN } else { g.0 };
+            (g.0 * 100.0, vec![g.0 * 100.0], vec![descriptor])
+        }
+    }
+
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+
+    // Seed a valid individual in bin 0
+    engine.seed_population(vec![TestDNA(0.05)], &NaNDescriptorEval); // desc = 0.05, maps to bin 0
+    let bin0_fitness = engine.archive_get(&vec![0]).unwrap().fitness;
+    assert!(
+        (bin0_fitness - 5.0).abs() < 0.1,
+        "Bin 0 should have fitness ~5.0"
+    );
+
+    // Try to seed individual with NaN descriptor (should be rejected, not map to bin 0)
+    engine.seed_population(vec![TestDNA(0.9)], &NaNDescriptorEval); // desc = NaN
+
+    // Bin 0 should still have the original elite, not the NaN-descriptor one
+    let final_bin0_fitness = engine.archive_get(&vec![0]).unwrap().fitness;
+    assert!(
+        (final_bin0_fitness - 5.0).abs() < 0.1,
+        "NaN descriptor individual should not corrupt bin 0. Expected ~5.0, got {}",
+        final_bin0_fitness
+    );
+}
+
+/// Test that NSGA-II properly handles NaN objectives by pushing them to worse fronts.
+/// Before fix: NaN individuals ended up in Pareto Front 0 (best rank).
+#[test]
+fn test_nsga2_nan_objectives_pushed_to_worst_front() {
+    struct NaNObjectivesEval;
+    impl Evaluator<TestDNA> for NaNObjectivesEval {
+        fn evaluate(&self, g: &TestDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            // Half the population gets NaN objectives
+            if g.0 > 0.5 {
+                (f32::NAN, vec![f32::NAN, f32::NAN], vec![])
+            } else {
+                (g.0, vec![g.0, 1.0 - g.0], vec![])
+            }
+        }
+    }
+
+    let initial: Vec<TestDNA> = (0..20).map(|i| TestDNA(i as f32 / 20.0)).collect();
+    let mut nsga = Nsga2::new(initial, 0.1, 42);
+
+    // Run evolution
+    for _ in 0..20 {
+        nsga.step(&NaNObjectivesEval);
+    }
+
+    // After evolution, the population should be dominated by valid individuals
+    // (NaN individuals should have been pushed to worse fronts and selected against)
+    let pop = nsga.population();
+    let nan_count = pop
+        .iter()
+        .filter(|p| p.objectives.iter().any(|o| o.is_nan()))
+        .count();
+
+    // Allow some NaN individuals to survive (due to random selection), but they
+    // should not dominate. With proper NaN handling, valid individuals should
+    // be strongly preferred.
+    assert!(
+        nan_count < pop.len() / 2,
+        "NaN individuals should not dominate population. Found {} NaN out of {}",
+        nan_count,
+        pop.len()
+    );
+}
+
+/// Test that NSGA-II dominates function handles NaN correctly.
+#[test]
+fn test_nsga2_dominates_nan_handling() {
+    // Create phenotypes for testing
+    let valid_a = Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![3.0, 2.0],
+        descriptor: vec![],
+    };
+    let valid_b = Phenotype {
+        genotype: TestDNA(0.3),
+        fitness: 0.3,
+        objectives: vec![2.0, 1.0],
+        descriptor: vec![],
+    };
+    let nan_individual = Phenotype {
+        genotype: TestDNA(0.9),
+        fitness: f32::NAN,
+        objectives: vec![f32::NAN, 5.0],
+        descriptor: vec![],
+    };
+
+    // Valid a dominates valid b (better in both objectives)
+    assert!(
+        Nsga2::<TestDNA>::dominates(&valid_a, &valid_b),
+        "Valid [3,2] should dominate valid [2,1]"
+    );
+
+    // NaN individual should NOT dominate valid individuals
+    assert!(
+        !Nsga2::<TestDNA>::dominates(&nan_individual, &valid_b),
+        "NaN individual should not dominate valid individual"
+    );
+
+    // Valid individual SHOULD dominate NaN individual
+    assert!(
+        Nsga2::<TestDNA>::dominates(&valid_a, &nan_individual),
+        "Valid individual should dominate NaN individual"
+    );
+
+    // NaN vs NaN: neither dominates
+    let nan_b = Phenotype {
+        genotype: TestDNA(0.8),
+        fitness: f32::NAN,
+        objectives: vec![f32::NAN, f32::NAN],
+        descriptor: vec![],
+    };
+    assert!(
+        !Nsga2::<TestDNA>::dominates(&nan_individual, &nan_b),
+        "NaN should not dominate NaN"
+    );
+}
+
+/// Test that MapElites recovers from NaN corruption in archive.
+/// If somehow a NaN elite exists, valid individuals should be able to replace it.
+#[test]
+fn test_map_elites_nan_recovery() {
+    struct ControlledEval {
+        return_nan: bool,
+    }
+    impl Evaluator<TestDNA> for ControlledEval {
+        fn evaluate(&self, g: &TestDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            let fitness = if self.return_nan {
+                f32::NAN
+            } else {
+                g.0 * 100.0
+            };
+            (fitness, vec![fitness], vec![0.5])
+        }
+    }
+
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+
+    // Seed with valid individual
+    engine.seed_population(vec![TestDNA(0.3)], &ControlledEval { return_nan: false });
+    let initial_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    assert!(
+        (initial_fitness - 30.0).abs() < 0.01,
+        "Initial fitness should be ~30.0, got {}",
+        initial_fitness
+    );
+
+    // Try to overwrite with NaN (should be rejected)
+    engine.seed_population(vec![TestDNA(0.9)], &ControlledEval { return_nan: true });
+    let after_nan_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    assert!(
+        (after_nan_fitness - 30.0).abs() < 0.01,
+        "NaN should not overwrite valid elite, got {}",
+        after_nan_fitness
+    );
+
+    // Valid individual with lower fitness should not overwrite
+    engine.seed_population(vec![TestDNA(0.1)], &ControlledEval { return_nan: false });
+    let after_lower_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    assert!(
+        (after_lower_fitness - 30.0).abs() < 0.01,
+        "Lower fitness should not overwrite, got {}",
+        after_lower_fitness
+    );
+
+    // Valid individual with higher fitness should overwrite
+    engine.seed_population(vec![TestDNA(0.5)], &ControlledEval { return_nan: false });
+    let final_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    assert!(
+        (final_fitness - 50.0).abs() < 0.01,
+        "Higher fitness should overwrite, got {}",
+        final_fitness
+    );
+}

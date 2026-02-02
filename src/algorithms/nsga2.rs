@@ -477,6 +477,14 @@ impl<G: Genotype> Nsga2<G> {
     /// - `a` is at least as good as `b` in all objectives
     /// - `a` is strictly better than `b` in at least one objective
     ///
+    /// # NaN Handling
+    ///
+    /// - If `a` has any NaN objectives, it cannot dominate anything (returns `false`)
+    /// - If `b` has any NaN objectives but `a` is valid, `a` dominates `b`
+    ///
+    /// This ensures NaN individuals are dominated by all valid individuals,
+    /// placing them in the worst Pareto fronts rather than front 0.
+    ///
     /// # Arguments
     ///
     /// * `a` - First phenotype
@@ -492,11 +500,25 @@ impl<G: Genotype> Nsga2<G> {
     /// ```text
     /// a = [3, 2], b = [2, 1] -> a dominates b (better in both)
     /// a = [3, 1], b = [2, 2] -> neither dominates (trade-off)
+    /// a = [NaN, 2], b = [2, 1] -> a does not dominate b (a is invalid)
+    /// a = [3, 2], b = [NaN, 1] -> a dominates b (b is invalid)
     /// ```
     pub fn dominates(a: &Phenotype<G>, b: &Phenotype<G>) -> bool {
         if a.objectives.len() != b.objectives.len() {
             return false;
         }
+
+        // If a has any NaN objectives, it cannot dominate anything
+        if a.objectives.iter().any(|v| v.is_nan()) {
+            return false;
+        }
+
+        // If b has any NaN objectives and a is valid, a dominates b
+        // This ensures NaN individuals are pushed to worse fronts
+        if b.objectives.iter().any(|v| v.is_nan()) {
+            return true;
+        }
+
         let mut better_in_any = false;
         for (oa, ob) in a.objectives.iter().zip(b.objectives.iter()) {
             if oa < ob {

@@ -356,6 +356,17 @@ impl<G: Genotype> MapElites<G> {
     pub fn seed_population<E: Evaluator<G>>(&mut self, initial: Vec<G>, evaluator: &E) {
         for dna in initial {
             let (f, obj, desc) = evaluator.evaluate(&dna);
+
+            // Skip individuals with NaN fitness - they cannot meaningfully compete
+            if f.is_nan() {
+                continue;
+            }
+
+            // Skip individuals with NaN descriptors - they cannot be properly mapped
+            if desc.iter().any(|v| v.is_nan()) {
+                continue;
+            }
+
             let idx = self.map_to_index(&desc);
             let new_pheno = Phenotype {
                 genotype: dna,
@@ -363,11 +374,13 @@ impl<G: Genotype> MapElites<G> {
                 objectives: obj,
                 descriptor: desc,
             };
-            if self
-                .archive
-                .get(&idx)
-                .is_none_or(|existing| new_pheno.fitness > existing.fitness)
-            {
+            // Replace existing elite if:
+            // - Cell is empty, OR
+            // - New fitness is strictly better, OR
+            // - Existing elite has NaN fitness (corrupted state recovery)
+            if self.archive.get(&idx).is_none_or(|existing| {
+                new_pheno.fitness > existing.fitness || existing.fitness.is_nan()
+            }) {
                 let is_new_key = !self.archive.contains_key(&idx);
                 self.archive.insert(idx.clone(), new_pheno);
                 if is_new_key {
@@ -503,15 +516,32 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
         let mut idx_buffer: Vec<usize> = Vec::new();
 
         for (dna, f, obj, desc) in results {
+            // Skip individuals with NaN fitness - they cannot meaningfully compete
+            // with existing elites and would corrupt the archive if inserted.
+            // NaN comparisons always return false, so without this check:
+            // - NaN <= existing.fitness is false -> would overwrite valid elites
+            // - valid <= NaN is false -> would overwrite NaN (self-correcting but causes churn)
+            if f.is_nan() {
+                continue;
+            }
+
+            // Skip individuals with NaN descriptors - they cannot be properly mapped.
+            // NaN.clamp(0.0, 1.0) returns NaN, and NaN as usize saturates to 0,
+            // which would silently map all NaN-descriptor individuals to bin 0.
+            if desc.iter().any(|v| v.is_nan()) {
+                continue;
+            }
+
             // Resize buffer to match descriptor dimensions, reusing capacity
             idx_buffer.resize(desc.len(), 0);
             self.map_to_index_into(&desc, &mut idx_buffer);
 
             // Check if offspring should enter archive before cloning the key
+            // Using > instead of <= ensures NaN in existing elites gets replaced by valid fitness
             let dominated = self
                 .archive
                 .get(&idx_buffer)
-                .is_some_and(|e| f <= e.fitness);
+                .is_some_and(|e| f <= e.fitness && !e.fitness.is_nan());
 
             if !dominated {
                 let new_pheno = Phenotype {
