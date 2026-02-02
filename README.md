@@ -1,6 +1,6 @@
 # symbios-genetics
 
-**A sovereign, battle-hardened evolutionary computation engine for Rust.**
+**A battle-hardened evolutionary computation engine for Rust.**
 
 `symbios-genetics` is a trait-based library designed for **Morphogenetic Engineering**, **Artificial Life**, and **Creative AI**. Unlike general-purpose genetic libraries, it prioritizes **correctness**, **reproducibility**, and **serialization** above all else.
 
