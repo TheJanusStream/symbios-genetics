@@ -5,11 +5,7 @@ use rand_pcg::Pcg64;
 use serde::{Deserialize, Serialize};
 use symbios_genetics::{
     Evaluator, Evolver, Genotype, Phenotype,
-    algorithms::{
-        map_elites::MapElites,
-        nsga2::Nsga2,
-        simple::SimpleGA,
-    },
+    algorithms::{map_elites::MapElites, nsga2::Nsga2, simple::SimpleGA},
 };
 
 // =============================================================================
@@ -119,7 +115,11 @@ fn create_floatvec_population(size: usize, genome_len: usize, seed: u64) -> Vec<
         .collect()
 }
 
-fn create_phenotypes_for_sorting(size: usize, num_objectives: usize, seed: u64) -> Vec<Phenotype<FloatVec>> {
+fn create_phenotypes_for_sorting(
+    size: usize,
+    num_objectives: usize,
+    seed: u64,
+) -> Vec<Phenotype<FloatVec>> {
     let mut rng = Pcg64::seed_from_u64(seed);
     (0..size)
         .map(|_| {
@@ -227,9 +227,7 @@ fn bench_nsga2_non_dominated_sort(c: &mut Criterion) {
             pop_size,
             |b, &size| {
                 let phenotypes = create_phenotypes_for_sorting(size, 2, 42);
-                b.iter(|| {
-                    black_box(Nsga2::<FloatVec>::fast_non_dominated_sort(&phenotypes))
-                });
+                b.iter(|| black_box(Nsga2::<FloatVec>::fast_non_dominated_sort(&phenotypes)));
             },
         );
     }
@@ -271,16 +269,10 @@ fn bench_nsga2_objectives_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("NSGA2/num_objectives");
 
     for num_obj in [2, 3, 5, 8].iter() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_obj),
-            num_obj,
-            |b, &num| {
-                let phenotypes = create_phenotypes_for_sorting(100, num, 42);
-                b.iter(|| {
-                    black_box(Nsga2::<FloatVec>::fast_non_dominated_sort(&phenotypes))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(num_obj), num_obj, |b, &num| {
+            let phenotypes = create_phenotypes_for_sorting(100, num, 42);
+            b.iter(|| black_box(Nsga2::<FloatVec>::fast_non_dominated_sort(&phenotypes)));
+        });
     }
     group.finish();
 }
@@ -347,18 +339,12 @@ fn bench_map_elites_map_to_index(c: &mut Criterion) {
 
     for dims in [2, 4, 8, 16].iter() {
         group.throughput(Throughput::Elements(*dims as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(dims),
-            dims,
-            |b, &d| {
-                let me = MapElites::<FloatVec>::new(100, 0.3, 42);
-                let mut rng = Pcg64::seed_from_u64(42);
-                let descriptor: Vec<f32> = (0..d).map(|_| rng.random::<f32>()).collect();
-                b.iter(|| {
-                    black_box(me.map_to_index(&descriptor))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(dims), dims, |b, &d| {
+            let me = MapElites::<FloatVec>::new(100, 0.3, 42);
+            let mut rng = Pcg64::seed_from_u64(42);
+            let descriptor: Vec<f32> = (0..d).map(|_| rng.random::<f32>()).collect();
+            b.iter(|| black_box(me.map_to_index(&descriptor)));
+        });
     }
     group.finish();
 }
