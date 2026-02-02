@@ -7,16 +7,58 @@ use std::collections::HashMap;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// Internal representation for serialization (without cache)
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
+struct MapElitesData<G: Genotype> {
+    archive: HashMap<Vec<usize>, Phenotype<G>>,
+    resolution: usize,
+    mutation_rate: f32,
+    batch_size: usize,
+    rng: Pcg64,
+}
+
 pub struct MapElites<G: Genotype> {
     pub archive: HashMap<Vec<usize>, Phenotype<G>>,
-    #[serde(skip)]
     population_cache: Vec<Phenotype<G>>,
     pub resolution: usize,
     pub mutation_rate: f32,
     pub batch_size: usize,
     rng: Pcg64,
+}
+
+impl<G: Genotype> Serialize for MapElites<G> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("MapElites", 5)?;
+        state.serialize_field("archive", &self.archive)?;
+        state.serialize_field("resolution", &self.resolution)?;
+        state.serialize_field("mutation_rate", &self.mutation_rate)?;
+        state.serialize_field("batch_size", &self.batch_size)?;
+        state.serialize_field("rng", &self.rng)?;
+        state.end()
+    }
+}
+
+impl<'de, G: Genotype> Deserialize<'de> for MapElites<G> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = MapElitesData::<G>::deserialize(deserializer)?;
+        let population_cache: Vec<Phenotype<G>> = data.archive.values().cloned().collect();
+        Ok(Self {
+            archive: data.archive,
+            population_cache,
+            resolution: data.resolution,
+            mutation_rate: data.mutation_rate,
+            batch_size: data.batch_size,
+            rng: data.rng,
+        })
+    }
 }
 
 impl<G: Genotype> MapElites<G> {
@@ -45,6 +87,11 @@ impl<G: Genotype> MapElites<G> {
                 },
             );
         }
+        self.rebuild_cache();
+    }
+
+    fn rebuild_cache(&mut self) {
+        self.population_cache = self.archive.values().cloned().collect();
     }
 
     pub fn map_to_index(&self, descriptor: &[f32]) -> Vec<usize> {
@@ -108,7 +155,7 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
                 self.archive.insert(idx, new_pheno);
             }
         }
-        self.population_cache = self.archive.values().cloned().collect();
+        self.rebuild_cache();
     }
 
     fn population(&self) -> &[Phenotype<G>] {

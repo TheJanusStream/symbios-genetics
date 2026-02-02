@@ -10,10 +10,24 @@ use rayon::prelude::*;
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "G: Genotype")]
 pub struct Nsga2<G: Genotype> {
-    pub population: Vec<Phenotype<G>>,
-    pub pop_size: usize,
-    pub mutation_rate: f32,
+    population: Vec<Phenotype<G>>,
+    pop_size: usize,
+    mutation_rate: f32,
     rng: Pcg64,
+}
+
+impl<G: Genotype> Nsga2<G> {
+    pub fn pop_size(&self) -> usize {
+        self.pop_size
+    }
+
+    pub fn mutation_rate(&self) -> f32 {
+        self.mutation_rate
+    }
+
+    pub fn set_mutation_rate(&mut self, rate: f32) {
+        self.mutation_rate = rate;
+    }
 }
 
 #[derive(Clone)]
@@ -95,7 +109,20 @@ impl<G: Genotype> Nsga2<G> {
             return;
         }
 
-        let obj_count = front[0].pheno.objectives.len();
+        // Use minimum objective count to handle ragged objectives safely
+        let obj_count = front
+            .iter()
+            .map(|w| w.pheno.objectives.len())
+            .min()
+            .unwrap_or(0);
+
+        if obj_count == 0 {
+            for ind in front {
+                ind.distance = f32::INFINITY;
+            }
+            return;
+        }
+
         for m in 0..obj_count {
             front.sort_by(|a, b| {
                 a.pheno.objectives[m]
@@ -118,6 +145,10 @@ impl<G: Genotype> Nsga2<G> {
     }
 
     pub fn dominates(a: &Phenotype<G>, b: &Phenotype<G>) -> bool {
+        // Incomparable if objective counts differ
+        if a.objectives.len() != b.objectives.len() {
+            return false;
+        }
         let mut better_in_any = false;
         for (oa, ob) in a.objectives.iter().zip(b.objectives.iter()) {
             if oa < ob {
@@ -133,10 +164,20 @@ impl<G: Genotype> Nsga2<G> {
 
 impl<G: Genotype> Evolver<G> for Nsga2<G> {
     fn step<E: Evaluator<G>>(&mut self, evaluator: &E) {
+        if self.population.is_empty() {
+            return;
+        }
+
         let mut offspring = vec![];
         while offspring.len() < self.pop_size {
-            let p1 = self.population.choose(&mut self.rng).unwrap();
-            let p2 = self.population.choose(&mut self.rng).unwrap();
+            let p1 = self
+                .population
+                .choose(&mut self.rng)
+                .expect("population verified non-empty");
+            let p2 = self
+                .population
+                .choose(&mut self.rng)
+                .expect("population verified non-empty");
             let mut child_dna = p1.genotype.crossover(&p2.genotype, &mut self.rng);
             child_dna.mutate(&mut self.rng, self.mutation_rate);
             offspring.push(Phenotype {
