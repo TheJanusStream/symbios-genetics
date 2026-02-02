@@ -86,6 +86,18 @@ use std::cmp::Ordering;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// Internal representation for serialization (excludes derived state).
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "G: Genotype")]
+struct Nsga2Data<G: Genotype> {
+    population: Vec<Phenotype<G>>,
+    ranks: Vec<usize>,
+    crowding_distances: Vec<f32>,
+    pop_size: usize,
+    mutation_rate: f32,
+    rng: Pcg64,
+}
+
 /// NSGA-II multi-objective evolutionary algorithm.
 ///
 /// Maintains a population that evolves toward the Pareto front of a
@@ -100,8 +112,6 @@ use rayon::prelude::*;
 /// NSGA-II uses binary tournament selection based on:
 /// 1. **Rank** (lower is better): Solutions on the Pareto front have rank 0
 /// 2. **Crowding distance** (higher is better): Tie-breaker that favors diversity
-#[derive(Serialize, Deserialize)]
-#[serde(bound = "G: Genotype")]
 pub struct Nsga2<G: Genotype> {
     population: Vec<Phenotype<G>>,
     /// Pareto rank for each individual (0 = non-dominated front).
@@ -111,6 +121,82 @@ pub struct Nsga2<G: Genotype> {
     pop_size: usize,
     mutation_rate: f32,
     rng: Pcg64,
+}
+
+impl<G: Genotype> Serialize for Nsga2<G> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Nsga2", 6)?;
+        state.serialize_field("population", &self.population)?;
+        state.serialize_field("ranks", &self.ranks)?;
+        state.serialize_field("crowding_distances", &self.crowding_distances)?;
+        state.serialize_field("pop_size", &self.pop_size)?;
+        state.serialize_field("mutation_rate", &self.mutation_rate)?;
+        state.serialize_field("rng", &self.rng)?;
+        state.end()
+    }
+}
+
+impl<'de, G: Genotype> Deserialize<'de> for Nsga2<G> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let data = Nsga2Data::<G>::deserialize(deserializer)?;
+
+        // Validate population is not empty (empty is handled gracefully but pop_size would be wrong)
+        if data.pop_size == 0 {
+            return Err(D::Error::custom("pop_size must be greater than 0"));
+        }
+
+        // Validate population length matches pop_size
+        if data.population.len() != data.pop_size {
+            return Err(D::Error::custom(format!(
+                "population length ({}) does not match pop_size ({})",
+                data.population.len(),
+                data.pop_size
+            )));
+        }
+
+        // Validate ranks length matches population length
+        // This prevents index out of bounds in binary_tournament
+        if data.ranks.len() != data.population.len() {
+            return Err(D::Error::custom(format!(
+                "ranks length ({}) does not match population length ({})",
+                data.ranks.len(),
+                data.population.len()
+            )));
+        }
+
+        // Validate crowding_distances length matches population length
+        // This prevents index out of bounds in binary_tournament
+        if data.crowding_distances.len() != data.population.len() {
+            return Err(D::Error::custom(format!(
+                "crowding_distances length ({}) does not match population length ({})",
+                data.crowding_distances.len(),
+                data.population.len()
+            )));
+        }
+
+        // Validate mutation_rate is not NaN or infinite
+        if data.mutation_rate.is_nan() || data.mutation_rate.is_infinite() {
+            return Err(D::Error::custom("mutation_rate must be a finite number"));
+        }
+
+        Ok(Self {
+            population: data.population,
+            ranks: data.ranks,
+            crowding_distances: data.crowding_distances,
+            pop_size: data.pop_size,
+            mutation_rate: data.mutation_rate,
+            rng: data.rng,
+        })
+    }
 }
 
 impl<G: Genotype> Nsga2<G> {
@@ -242,10 +328,11 @@ impl<G: Genotype> Nsga2<G> {
             Ordering::Less => i,
             Ordering::Greater => j,
             Ordering::Equal => {
-                if self.crowding_distances[i] >= self.crowding_distances[j] {
-                    i
-                } else {
-                    j
+                // Use total_cmp for NaN-safe comparison (NaN is treated as greater than all values)
+                // Higher crowding distance is better, so we want the one with greater distance
+                match self.crowding_distances[i].total_cmp(&self.crowding_distances[j]) {
+                    Ordering::Greater | Ordering::Equal => i,
+                    Ordering::Less => j,
                 }
             }
         }
@@ -364,10 +451,9 @@ impl<G: Genotype> Nsga2<G> {
         let obj_count = min_obj;
 
         for m in 0..obj_count {
+            // Use total_cmp for NaN-safe sorting (NaN sorts to end)
             front.sort_by(|a, b| {
-                combined[a.index].objectives[m]
-                    .partial_cmp(&combined[b.index].objectives[m])
-                    .unwrap_or(Ordering::Equal)
+                combined[a.index].objectives[m].total_cmp(&combined[b.index].objectives[m])
             });
             let range =
                 combined[front[n - 1].index].objectives[m] - combined[front[0].index].objectives[m];
@@ -480,11 +566,8 @@ impl<G: Genotype> Evolver<G> for Nsga2<G> {
             if next_gen.len() + current_front.len() <= self.pop_size {
                 next_gen.extend(current_front);
             } else {
-                current_front.sort_by(|a, b| {
-                    b.distance
-                        .partial_cmp(&a.distance)
-                        .unwrap_or(Ordering::Equal)
-                });
+                // Use total_cmp for NaN-safe sorting (higher distance is better, so reverse order)
+                current_front.sort_by(|a, b| b.distance.total_cmp(&a.distance));
                 next_gen.extend(
                     current_front
                         .into_iter()

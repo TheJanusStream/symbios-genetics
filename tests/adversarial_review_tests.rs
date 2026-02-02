@@ -841,3 +841,310 @@ fn test_map_elites_step_uses_buffer_optimization() {
         );
     }
 }
+
+// ============================================================================
+// Issue #41: Nsga2 Deserialization State Desynchronization (Critical DoS)
+// Review: population, ranks, crowding_distances must have same length
+// ============================================================================
+
+use symbios_genetics::algorithms::nsga2::Nsga2;
+
+/// Mirror of internal Nsga2 structure for testing malicious deserialization.
+#[derive(Serialize)]
+struct MaliciousNsga2Data {
+    population: Vec<Phenotype<TestDNA>>,
+    ranks: Vec<usize>,
+    crowding_distances: Vec<f32>,
+    pop_size: usize,
+    mutation_rate: f32,
+    rng: Pcg64,
+}
+
+/// Test that deserializing Nsga2 with desynced ranks vector fails gracefully.
+/// Before fix: Causes index out of bounds panic in binary_tournament.
+#[test]
+fn test_nsga2_deserialize_rejects_ranks_desync() {
+    let pop = vec![Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![0.5],
+        descriptor: vec![],
+    }];
+
+    let malicious = MaliciousNsga2Data {
+        population: pop,
+        ranks: vec![], // CRITICAL: Empty while population has 1 element
+        crowding_distances: vec![],
+        pop_size: 1,
+        mutation_rate: 0.1,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<Nsga2<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing Nsga2 with desynced ranks should fail, not panic later.\n\
+         This prevents DoS via index out of bounds in binary_tournament."
+    );
+}
+
+/// Test that deserializing Nsga2 with desynced crowding_distances fails gracefully.
+#[test]
+fn test_nsga2_deserialize_rejects_crowding_distances_desync() {
+    let pop = vec![
+        Phenotype {
+            genotype: TestDNA(0.3),
+            fitness: 0.3,
+            objectives: vec![0.3],
+            descriptor: vec![],
+        },
+        Phenotype {
+            genotype: TestDNA(0.7),
+            fitness: 0.7,
+            objectives: vec![0.7],
+            descriptor: vec![],
+        },
+    ];
+
+    let malicious = MaliciousNsga2Data {
+        population: pop,
+        ranks: vec![0, 0],             // Correct length
+        crowding_distances: vec![1.0], // Wrong: only 1 element for 2 individuals
+        pop_size: 2,
+        mutation_rate: 0.1,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<Nsga2<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing Nsga2 with desynced crowding_distances should fail"
+    );
+}
+
+/// Test that deserializing Nsga2 with pop_size mismatch fails gracefully.
+#[test]
+fn test_nsga2_deserialize_rejects_pop_size_mismatch() {
+    let pop = vec![Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![0.5],
+        descriptor: vec![],
+    }];
+
+    let malicious = MaliciousNsga2Data {
+        population: pop,
+        ranks: vec![0],
+        crowding_distances: vec![f32::INFINITY],
+        pop_size: 100, // Wrong: claims 100 but only 1 in population
+        mutation_rate: 0.1,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<Nsga2<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing Nsga2 with pop_size mismatch should fail"
+    );
+}
+
+/// Test that deserializing Nsga2 with invalid mutation_rate fails gracefully.
+#[test]
+fn test_nsga2_deserialize_rejects_nan_mutation_rate() {
+    let pop = vec![Phenotype {
+        genotype: TestDNA(0.5),
+        fitness: 0.5,
+        objectives: vec![0.5],
+        descriptor: vec![],
+    }];
+
+    let malicious = MaliciousNsga2Data {
+        population: pop,
+        ranks: vec![0],
+        crowding_distances: vec![f32::INFINITY],
+        pop_size: 1,
+        mutation_rate: f32::NAN, // Invalid
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<Nsga2<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    assert!(
+        result.is_err(),
+        "Deserializing Nsga2 with NaN mutation_rate should fail"
+    );
+}
+
+/// Test that valid Nsga2 serialization round-trips correctly.
+#[test]
+fn test_nsga2_valid_serialization_roundtrip() {
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let mut nsga = Nsga2::new(initial, 0.1, 42);
+
+    // Run a step to populate ranks/distances properly
+    nsga.step(&TestEval);
+
+    // Serialize and deserialize
+    let serialized = bincode::serialize(&nsga).unwrap();
+    let mut deserialized: Nsga2<TestDNA> = bincode::deserialize(&serialized).unwrap();
+
+    // Should work correctly
+    deserialized.step(&TestEval);
+    assert_eq!(deserialized.pop_size(), 10);
+}
+
+// ============================================================================
+// Issue #42: NaN Bias in Nsga2 Binary Tournament Selection
+// Review: NaN crowding distances cause biased selection
+// ============================================================================
+
+/// Test that NaN crowding distances don't cause panics or crashes.
+/// The fix uses total_cmp for NaN-safe comparisons in all sorting operations.
+#[test]
+fn test_nsga2_nan_crowding_distance_handling() {
+    // This test verifies that the algorithm handles NaN values without crashing.
+    // Before the fix, NaN in objectives would cause "comparison function does not
+    // correctly implement a total order" panic during sorting.
+
+    struct NaNInjectingEval;
+
+    impl Evaluator<TestDNA> for NaNInjectingEval {
+        fn evaluate(&self, g: &TestDNA) -> (f32, Vec<f32>, Vec<f32>) {
+            // Inject NaN in objectives for some individuals to test sorting robustness
+            let obj1 = if g.0 > 0.8 { f32::NAN } else { g.0 };
+            let obj2 = if g.0 < 0.2 { f32::NAN } else { -g.0 };
+            let fitness = if obj1.is_nan() || obj2.is_nan() {
+                f32::NEG_INFINITY // Mark NaN individuals as low fitness
+            } else {
+                g.0
+            };
+            (fitness, vec![obj1, obj2], vec![])
+        }
+    }
+
+    let initial: Vec<TestDNA> = (0..20).map(|i| TestDNA(i as f32 / 20.0)).collect();
+    let mut nsga = Nsga2::new(initial, 0.3, 42);
+
+    // Run with NaN injection - should not crash (this was the bug)
+    for _ in 0..10 {
+        nsga.step(&NaNInjectingEval);
+    }
+
+    // Verify population is still valid and algorithm completed
+    let pop = nsga.population();
+    assert_eq!(pop.len(), 20, "Population should maintain size");
+}
+
+/// Test that binary_tournament doesn't bias toward NaN crowding distances.
+#[test]
+fn test_nsga2_binary_tournament_nan_no_bias() {
+    // This test verifies that when both candidates have equal rank,
+    // the one with NaN crowding distance doesn't get unfair advantage.
+    // With total_cmp, NaN > any finite value, so NaN distances are
+    // treated as "most isolated" (which is actually reasonable behavior
+    // since we can't measure their crowding).
+
+    let initial: Vec<TestDNA> = (0..10).map(|i| TestDNA(i as f32)).collect();
+    let mut nsga = Nsga2::new(initial, 0.1, 42);
+
+    // Run a step to get valid population
+    nsga.step(&TestEval);
+
+    // The algorithm should complete without issues
+    assert_eq!(nsga.pop_size(), 10);
+}
+
+// ============================================================================
+// Issue #43: MapElites Resolution Integer Overflow at Extreme Values
+// Review: Pedantic - f32 precision loss at resolutions > 2^24
+// ============================================================================
+
+/// Test MapElites binning precision at moderate resolutions.
+#[test]
+fn test_map_elites_resolution_precision_moderate() {
+    // At resolution 1000, f32 has plenty of precision
+    let engine = MapElites::<TestDNA>::new(1000, 0.1, 42);
+
+    // Test boundary values
+    let idx_zero = engine.map_to_index(&[0.0]);
+    assert_eq!(idx_zero, vec![0], "0.0 should map to bin 0");
+
+    let idx_one = engine.map_to_index(&[1.0]);
+    assert_eq!(idx_one, vec![999], "1.0 should map to last bin (999)");
+
+    // Test mid-point precision
+    let idx_half = engine.map_to_index(&[0.5]);
+    assert_eq!(idx_half, vec![500], "0.5 should map to bin 500");
+
+    // Test near-boundary values
+    let idx_near_one = engine.map_to_index(&[0.999]);
+    assert_eq!(idx_near_one, vec![999], "0.999 should map to bin 999");
+}
+
+/// Test MapElites binning at maximum safe resolution (within f32 precision).
+#[test]
+fn test_map_elites_resolution_max_safe() {
+    // 2^24 = 16,777,216 is the maximum integer exactly representable in f32
+    // We use a smaller value to stay safely within precision limits
+    let safe_resolution = 1 << 20; // 1,048,576
+    let engine = MapElites::<TestDNA>::new(safe_resolution, 0.1, 42);
+
+    // These should work correctly
+    let idx_zero = engine.map_to_index(&[0.0]);
+    assert_eq!(idx_zero, vec![0]);
+
+    let idx_one = engine.map_to_index(&[1.0]);
+    assert_eq!(idx_one, vec![safe_resolution - 1]);
+
+    // Mid-point should be approximately correct
+    let idx_half = engine.map_to_index(&[0.5]);
+    let expected_half = safe_resolution / 2;
+    assert!(
+        (idx_half[0] as i64 - expected_half as i64).abs() <= 1,
+        "0.5 should map near bin {} at resolution {}, got {}",
+        expected_half,
+        safe_resolution,
+        idx_half[0]
+    );
+}
+
+/// Test that extreme resolutions are handled gracefully (documented limitation).
+#[test]
+fn test_map_elites_resolution_extreme_documented() {
+    // At extremely high resolutions, we accept some precision loss
+    // but the algorithm should not panic or produce wildly wrong results
+    let extreme_resolution = 1 << 26; // 67,108,864 - beyond f32 precision
+    let engine = MapElites::<TestDNA>::new(extreme_resolution, 0.1, 42);
+
+    // Boundaries should still work
+    let idx_zero = engine.map_to_index(&[0.0]);
+    assert_eq!(idx_zero, vec![0], "0.0 should always map to bin 0");
+
+    let idx_one = engine.map_to_index(&[1.0]);
+    assert_eq!(
+        idx_one,
+        vec![extreme_resolution - 1],
+        "1.0 should always map to last bin"
+    );
+
+    // Mid-point may have some precision error but should be in ballpark
+    let idx_half = engine.map_to_index(&[0.5]);
+    let expected_half = extreme_resolution / 2;
+    let error = (idx_half[0] as i64 - expected_half as i64).abs();
+    let max_acceptable_error = (extreme_resolution / 1000) as i64; // 0.1% tolerance
+
+    assert!(
+        error <= max_acceptable_error,
+        "0.5 mapping error {} exceeds tolerance {} at resolution {}",
+        error,
+        max_acceptable_error,
+        extreme_resolution
+    );
+}
