@@ -4,12 +4,6 @@
 
 `symbios-genetics` is a trait-based library designed for **Morphogenetic Engineering**, **Artificial Life**, and **Creative AI**. Unlike general-purpose genetic libraries, it prioritizes **correctness**, **reproducibility**, and **serialization** above all else.
 
-## Key Features
-
-*   **Trait-Based Architecture:** Strictly decouples the *Genotype* (Mutation/Crossover logic) from the *Phenotype* (Performance/Metrics).
-*   **Parallel-First:** Built-in `rayon` support allows for $O(N)$ scaling of fitness evaluation.
-*   **Zero-Copy Design:** Uses efficient data structures (e.g., `BTreeMap` for sparse MAP-Elites archives) to minimize allocation overhead during evolution steps.
-
 ## Algorithms
 
 The library implements three distinct evolutionary strategies covering the spectrum of optimization needs:
