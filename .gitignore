@@ -6,3 +6,4 @@ Cargo.lock
 CHANGELOG.md
 symbios-genetics-primer.sh
 symbios_genetics_primer_*
+.mcp.json
