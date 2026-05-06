@@ -297,3 +297,7 @@ pub mod algorithms {
 
 /// Pre-made composable scorers for locomotion / robotics evolution.
 pub mod scorers;
+
+/// Speciation primitives: cluster a population by user-supplied compatibility
+/// distance, share fitness within species, dynamically tune the threshold.
+pub mod speciation;
