@@ -53,7 +53,7 @@
 //!     }
 //! }
 //!
-//! let mut me = MapElites::<Point>::new(10, 0.3, 42);
+//! let mut me = MapElites::<Point>::new(10, 0.3, 64, 42);
 //! me.seed_population(
 //!     (0..100).map(|_| Point(rand::random(), rand::random())).collect(),
 //!     &Rastrigin,
@@ -79,6 +79,7 @@
 //! Mouret, J.-B., & Clune, J. (2015). Illuminating search spaces by mapping elites.
 //! arXiv preprint arXiv:1504.04909.
 
+use crate::algorithms::archive::Archive;
 use crate::{Evaluator, Evolver, Genotype, Phenotype};
 use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64;
@@ -124,12 +125,7 @@ struct MapElitesData<G: Genotype> {
 /// MAP-Elites uses a seeded RNG ([`Pcg64`]) and deterministic iteration order
 /// ([`BTreeMap`]) to ensure reproducible results across runs.
 pub struct MapElites<G: Genotype> {
-    archive: BTreeMap<Vec<usize>, Phenotype<G>>,
-    /// Vec of archive keys for O(1) random parent sampling.
-    /// Avoids O(N) iteration of BTreeMap during step().
-    archive_keys_vec: Vec<Vec<usize>>,
-    population_cache: Vec<Phenotype<G>>,
-    cache_valid: bool,
+    archive: Archive<G>,
     resolution: usize,
     mutation_rate: f32,
     batch_size: usize,
@@ -143,8 +139,8 @@ impl<G: Genotype> Serialize for MapElites<G> {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("MapElites", 6)?;
-        state.serialize_field("archive", &self.archive)?;
-        state.serialize_field("archive_keys_vec", &self.archive_keys_vec)?;
+        state.serialize_field("archive", self.archive.cells())?;
+        state.serialize_field("archive_keys_vec", self.archive.keys_vec())?;
         state.serialize_field("resolution", &self.resolution)?;
         state.serialize_field("mutation_rate", &self.mutation_rate)?;
         state.serialize_field("batch_size", &self.batch_size)?;
@@ -172,30 +168,14 @@ impl<'de, G: Genotype> Deserialize<'de> for MapElites<G> {
             return Err(D::Error::custom("batch_size must be greater than 0"));
         }
 
-        // Validate archive_keys_vec integrity: each key must exist in archive
-        // This prevents panic from unwrap() during parent selection in step()
-        for key in &data.archive_keys_vec {
-            if !data.archive.contains_key(key) {
-                return Err(D::Error::custom(
-                    "archive_keys_vec contains key not present in archive",
-                ));
-            }
-        }
+        // Reconstruct archive and validate keys_vec ↔ cells consistency.
+        // This prevents an unwrap() panic during parent selection in step()
+        // and rejects truncated/desynced state from malicious deserialization.
+        let archive = Archive::from_raw(data.archive, data.archive_keys_vec);
+        archive.validate().map_err(D::Error::custom)?;
 
-        // Validate archive integrity: each archive key should be in archive_keys_vec
-        // This ensures the key vec is complete for random sampling
-        if data.archive.len() != data.archive_keys_vec.len() {
-            return Err(D::Error::custom(
-                "archive_keys_vec length does not match archive size",
-            ));
-        }
-
-        let population_cache: Vec<Phenotype<G>> = data.archive.values().cloned().collect();
         Ok(Self {
-            archive: data.archive,
-            archive_keys_vec: data.archive_keys_vec,
-            population_cache,
-            cache_valid: true,
+            archive,
             resolution: data.resolution,
             mutation_rate: data.mutation_rate,
             batch_size: data.batch_size,
@@ -211,11 +191,13 @@ impl<G: Genotype> MapElites<G> {
     ///
     /// * `resolution` - Number of bins per descriptor dimension. Must be > 0.
     /// * `mutation_rate` - Probability of mutation, typically in `[0.0, 1.0]`
+    /// * `batch_size` - Number of offspring generated per [`step`](Self::step). Must be > 0.
+    ///   A typical default is 64; larger values improve parallelism at the cost of memory.
     /// * `seed` - RNG seed for deterministic execution
     ///
     /// # Panics
     ///
-    /// Panics if `resolution` is 0.
+    /// Panics if `resolution` or `batch_size` is 0.
     ///
     /// # Example
     ///
@@ -230,19 +212,17 @@ impl<G: Genotype> MapElites<G> {
     /// #     fn crossover<R: Rng>(&self, _: &Self, _: &mut R) -> Self { G }
     /// # }
     ///
-    /// // 20x20 grid (400 cells) with 30% mutation rate
-    /// let me = MapElites::<G>::new(20, 0.3, 42);
+    /// // 20x20 grid (400 cells), 30% mutation rate, 64 offspring per step
+    /// let me = MapElites::<G>::new(20, 0.3, 64, 42);
     /// ```
-    pub fn new(resolution: usize, mutation_rate: f32, seed: u64) -> Self {
+    pub fn new(resolution: usize, mutation_rate: f32, batch_size: usize, seed: u64) -> Self {
         assert!(resolution > 0, "resolution must be greater than 0");
+        assert!(batch_size > 0, "batch_size must be greater than 0");
         Self {
-            archive: BTreeMap::new(),
-            archive_keys_vec: Vec::new(),
-            population_cache: Vec::new(),
-            cache_valid: true,
+            archive: Archive::new(),
             resolution,
             mutation_rate,
-            batch_size: 64,
+            batch_size,
             rng: Pcg64::seed_from_u64(seed),
         }
     }
@@ -327,11 +307,107 @@ impl<G: Genotype> MapElites<G> {
     ///
     /// The best elite, or `None` if the archive is empty.
     pub fn best_by_fitness(&self) -> Option<&Phenotype<G>> {
-        self.archive.values().max_by(|a, b| {
-            a.fitness
-                .partial_cmp(&b.fitness)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        self.archive.best_by_fitness()
+    }
+
+    /// Returns the fraction of cells occupied in the archive.
+    ///
+    /// Coverage is `archive_len / resolution^dimensions`, where dimensions is
+    /// taken from the first inserted elite's descriptor length. Returns `0.0`
+    /// for an empty archive.
+    ///
+    /// This is one of the two standard quality-diversity metrics. See also
+    /// [`qd_score`](Self::qd_score).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use symbios_genetics::algorithms::map_elites::MapElites;
+    /// # use serde::{Serialize, Deserialize};
+    /// # use rand::Rng;
+    /// # #[derive(Clone, Serialize, Deserialize)]
+    /// # struct G;
+    /// # impl symbios_genetics::Genotype for G {
+    /// #     fn mutate<R: Rng>(&mut self, _: &mut R, _: f32) {}
+    /// #     fn crossover<R: Rng>(&self, _: &Self, _: &mut R) -> Self { G }
+    /// # }
+    /// let me = MapElites::<G>::new(10, 0.1, 64, 42);
+    /// assert_eq!(me.coverage(), 0.0);
+    /// ```
+    pub fn coverage(&self) -> f64 {
+        let occupied = self.archive.len();
+        if occupied == 0 {
+            return 0.0;
+        }
+        let dim = self
+            .archive
+            .keys()
+            .next()
+            .expect("archive non-empty checked above")
+            .len();
+        let total = (self.resolution as f64).powi(dim as i32);
+        if total == 0.0 {
+            0.0
+        } else {
+            occupied as f64 / total
+        }
+    }
+
+    /// Returns the QD score (sum of fitness across all occupied cells).
+    ///
+    /// This is the standard quality-diversity metric: a higher score reflects
+    /// either better fitness, broader coverage, or both. NaN-fitness elites
+    /// are skipped (they should not enter the archive but are filtered
+    /// defensively).
+    ///
+    /// # Caveat: negative fitness
+    ///
+    /// QD score assumes non-negative fitness. If your fitness can be negative
+    /// (e.g. `fitness = -distance`), shift it to non-negative before relying on
+    /// this metric for cross-run comparison.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use symbios_genetics::algorithms::map_elites::MapElites;
+    /// # use serde::{Serialize, Deserialize};
+    /// # use rand::Rng;
+    /// # #[derive(Clone, Serialize, Deserialize)]
+    /// # struct G;
+    /// # impl symbios_genetics::Genotype for G {
+    /// #     fn mutate<R: Rng>(&mut self, _: &mut R, _: f32) {}
+    /// #     fn crossover<R: Rng>(&self, _: &Self, _: &mut R) -> Self { G }
+    /// # }
+    /// let me = MapElites::<G>::new(10, 0.1, 64, 42);
+    /// assert_eq!(me.qd_score(), 0.0);
+    /// ```
+    pub fn qd_score(&self) -> f64 {
+        self.archive.qd_score()
+    }
+
+    /// Exports the archive as CSV to the given writer.
+    ///
+    /// One header row plus one row per occupied cell, in the deterministic
+    /// iteration order of [`archive_iter`](Self::archive_iter). Columns:
+    ///
+    /// - `key` — bin indices joined with `;`
+    /// - `descriptor` — descriptor floats joined with `;`
+    /// - `fitness` — scalar fitness
+    /// - `objectives` — objective floats joined with `;`
+    /// - `genotype_hash` — 16-hex-char `seahash` of the bincode-serialised genotype
+    ///
+    /// The genotype hash is stable across runs given the same genotype bytes,
+    /// suitable for joining the CSV against a separate genotype dump.
+    ///
+    /// Available with the `export` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`](std::io::Error) if the writer fails or if a
+    /// genotype cannot be serialised by `bincode`.
+    #[cfg(feature = "export")]
+    pub fn export_csv<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        self.archive.export_csv(writer)
     }
 
     /// Seeds the archive with initial individuals.
@@ -357,44 +433,23 @@ impl<G: Genotype> MapElites<G> {
         for dna in initial {
             let (f, obj, desc) = evaluator.evaluate(&dna);
 
-            // Skip individuals with NaN fitness - they cannot meaningfully compete
-            if f.is_nan() {
+            // NaN-fitness and NaN-descriptor candidates are filtered by Archive::insert_if_better.
+            // We pre-check the descriptor here to avoid building a key for a candidate that will
+            // be rejected anyway.
+            if f.is_nan() || desc.iter().any(|v| v.is_nan()) {
                 continue;
             }
 
-            // Skip individuals with NaN descriptors - they cannot be properly mapped
-            if desc.iter().any(|v| v.is_nan()) {
-                continue;
-            }
-
-            let idx = self.map_to_index(&desc);
-            let new_pheno = Phenotype {
-                genotype: dna,
-                fitness: f,
-                objectives: obj,
-                descriptor: desc,
-            };
-            // Replace existing elite if:
-            // - Cell is empty, OR
-            // - New fitness is strictly better, OR
-            // - Existing elite has NaN fitness (corrupted state recovery)
-            if self.archive.get(&idx).is_none_or(|existing| {
-                new_pheno.fitness > existing.fitness || existing.fitness.is_nan()
-            }) {
-                let is_new_key = !self.archive.contains_key(&idx);
-                self.archive.insert(idx.clone(), new_pheno);
-                if is_new_key {
-                    self.archive_keys_vec.push(idx);
-                }
-                self.cache_valid = false;
-            }
-        }
-    }
-
-    fn ensure_cache_valid(&mut self) {
-        if !self.cache_valid {
-            self.population_cache = self.archive.values().cloned().collect();
-            self.cache_valid = true;
+            let key = self.map_to_index(&desc);
+            self.archive.insert_if_better(
+                key,
+                Phenotype {
+                    genotype: dna,
+                    fitness: f,
+                    objectives: obj,
+                    descriptor: desc,
+                },
+            );
         }
     }
 
@@ -414,7 +469,7 @@ impl<G: Genotype> MapElites<G> {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let me = MapElites::<G>::new(10, 0.1, 42);
+    /// let me = MapElites::<G>::new(10, 0.1, 64, 42);
     /// let idx = me.map_to_index(&[0.25, 0.75]);
     /// assert_eq!(idx, vec![2, 7]); // bins 2 and 7 out of 0-9
     /// ```
@@ -468,14 +523,16 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
         }
 
         let mutation_rate = self.mutation_rate;
-        let num_keys = self.archive_keys_vec.len();
 
-        // Pre-select parent keys and generate RNG seeds serially (RNG needs mutable access)
-        // O(batch_size) instead of O(archive_size)
+        // Pre-select parent keys and generate RNG seeds serially (RNG needs mutable access).
+        // O(batch_size) sampling using Archive::sample_key.
         let selections: Vec<(Vec<usize>, u64)> = (0..self.batch_size)
             .map(|_| {
-                let key_idx = self.rng.random_range(0..num_keys);
-                let key = self.archive_keys_vec[key_idx].clone();
+                let key = self
+                    .archive
+                    .sample_key(&mut self.rng)
+                    .expect("archive non-empty checked above")
+                    .clone();
                 let seed = self.rng.random::<u64>();
                 (key, seed)
             })
@@ -484,7 +541,13 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
         // Clone parents outside parallel section to avoid holding reference across threads
         let parents: Vec<G> = selections
             .iter()
-            .map(|(key, _)| self.archive.get(key).unwrap().genotype.clone())
+            .map(|(key, _)| {
+                self.archive
+                    .get(key)
+                    .expect("sampled key exists in archive")
+                    .genotype
+                    .clone()
+            })
             .collect();
 
         // Parallel: mutate with per-task RNG and evaluate
@@ -512,58 +575,32 @@ impl<G: Genotype> Evolver<G> for MapElites<G> {
             })
             .collect();
 
-        // Reuse a single buffer for index mapping to avoid per-offspring allocations
+        // Reuse a single buffer for index mapping to avoid per-offspring allocations.
         let mut idx_buffer: Vec<usize> = Vec::new();
 
         for (dna, f, obj, desc) in results {
-            // Skip individuals with NaN fitness - they cannot meaningfully compete
-            // with existing elites and would corrupt the archive if inserted.
-            // NaN comparisons always return false, so without this check:
-            // - NaN <= existing.fitness is false -> would overwrite valid elites
-            // - valid <= NaN is false -> would overwrite NaN (self-correcting but causes churn)
-            if f.is_nan() {
+            // NaN-fitness and NaN-descriptor candidates are filtered by Archive::insert_if_better,
+            // but pre-checking the descriptor here lets us skip the index-mapping work entirely.
+            if f.is_nan() || desc.iter().any(|v| v.is_nan()) {
                 continue;
             }
 
-            // Skip individuals with NaN descriptors - they cannot be properly mapped.
-            // NaN.clamp(0.0, 1.0) returns NaN, and NaN as usize saturates to 0,
-            // which would silently map all NaN-descriptor individuals to bin 0.
-            if desc.iter().any(|v| v.is_nan()) {
-                continue;
-            }
-
-            // Resize buffer to match descriptor dimensions, reusing capacity
             idx_buffer.resize(desc.len(), 0);
             self.map_to_index_into(&desc, &mut idx_buffer);
 
-            // Check if offspring should enter archive before cloning the key
-            // Using > instead of <= ensures NaN in existing elites gets replaced by valid fitness
-            let dominated = self
-                .archive
-                .get(&idx_buffer)
-                .is_some_and(|e| f <= e.fitness && !e.fitness.is_nan());
-
-            if !dominated {
-                let new_pheno = Phenotype {
+            self.archive.insert_if_better(
+                idx_buffer.clone(),
+                Phenotype {
                     genotype: dna,
                     fitness: f,
                     objectives: obj,
                     descriptor: desc,
-                };
-                let is_new_key = !self.archive.contains_key(&idx_buffer);
-                // Only allocate key Vec when actually inserting
-                let idx = idx_buffer.clone();
-                self.archive.insert(idx.clone(), new_pheno);
-                if is_new_key {
-                    self.archive_keys_vec.push(idx);
-                }
-                self.cache_valid = false;
-            }
+                },
+            );
         }
     }
 
     fn population(&mut self) -> &[Phenotype<G>] {
-        self.ensure_cache_valid();
-        &self.population_cache
+        self.archive.population()
     }
 }

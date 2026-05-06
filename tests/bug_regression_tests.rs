@@ -35,7 +35,7 @@ impl Evaluator<SimpleDNA> for SimpleEval {
 
 #[test]
 fn test_map_elites_population_visible_after_deserialization() {
-    let mut engine = MapElites::<SimpleDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<SimpleDNA>::new(10, 0.1, 64, 42);
     let eval = SimpleEval;
 
     // Seed with some individuals
@@ -71,7 +71,7 @@ fn test_map_elites_population_visible_after_deserialization() {
 
 #[test]
 fn test_map_elites_population_visible_after_seeding() {
-    let mut engine = MapElites::<SimpleDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<SimpleDNA>::new(10, 0.1, 64, 42);
     let eval = SimpleEval;
 
     // Seed the population

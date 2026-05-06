@@ -41,8 +41,7 @@ impl Evaluator<TestDNA> for TestEval {
 #[test]
 fn test_map_elites_deterministic_execution() {
     fn run_evolution(seed: u64) -> Vec<f32> {
-        let mut engine = MapElites::<TestDNA>::new(10, 0.5, seed);
-        engine.set_batch_size(8);
+        let mut engine = MapElites::<TestDNA>::new(10, 0.5, 8, seed);
 
         // Seed with diverse individuals
         let initial: Vec<TestDNA> = (0..20).map(|i| TestDNA(i as f32 / 20.0)).collect();
@@ -79,7 +78,7 @@ fn test_map_elites_deterministic_execution() {
 /// Test that archive iteration order is consistent (deterministic).
 #[test]
 fn test_map_elites_archive_iteration_order_deterministic() {
-    let mut engine = MapElites::<TestDNA>::new(5, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(5, 0.1, 64, 42);
 
     // Seed with individuals that map to different bins
     let initial: Vec<TestDNA> = vec![
@@ -123,13 +122,13 @@ fn test_map_elites_archive_iteration_order_deterministic() {
 #[should_panic(expected = "resolution must be greater than 0")]
 fn test_map_elites_rejects_zero_resolution() {
     // resolution=0 would cause underflow in map_to_index: (resolution - 1)
-    let _engine = MapElites::<TestDNA>::new(0, 0.1, 42);
+    let _engine = MapElites::<TestDNA>::new(0, 0.1, 64, 42);
 }
 
 #[test]
 fn test_map_elites_resolution_one_works() {
     // resolution=1 is valid (single bin)
-    let mut engine = MapElites::<TestDNA>::new(1, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(1, 0.1, 64, 42);
     engine.seed_population(vec![TestDNA(0.5)], &TestEval);
 
     // All descriptors should map to bin 0
@@ -161,7 +160,7 @@ fn test_map_elites_resolution_one_works() {
 
 #[test]
 fn test_map_elites_seed_population_respects_elitism() {
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
 
     struct ControlledEval;
     impl Evaluator<TestDNA> for ControlledEval {
@@ -195,7 +194,7 @@ fn test_map_elites_seed_population_respects_elitism() {
 
 #[test]
 fn test_map_elites_seed_population_replaces_worse() {
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
 
     struct ControlledEval;
     impl Evaluator<TestDNA> for ControlledEval {
@@ -270,13 +269,19 @@ fn test_simple_ga_population_size_invariant_maintained() {
 #[test]
 #[should_panic(expected = "batch_size must be greater than 0")]
 fn test_map_elites_rejects_zero_batch_size() {
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
     engine.set_batch_size(0);
 }
 
 #[test]
+#[should_panic(expected = "batch_size must be greater than 0")]
+fn test_map_elites_constructor_rejects_zero_batch_size() {
+    let _engine = MapElites::<TestDNA>::new(10, 0.1, 0, 42);
+}
+
+#[test]
 fn test_map_elites_batch_size_one_works() {
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
     engine.set_batch_size(1);
 
     engine.seed_population(vec![TestDNA(0.5)], &TestEval);
@@ -323,8 +328,7 @@ fn test_map_elites_parent_selection_scales_sublinearly() {
     }
 
     // Create archive with moderate size (1000 items)
-    let mut engine = MapElites::<SmallDNA>::new(100, 0.3, 42);
-    engine.set_batch_size(32);
+    let mut engine = MapElites::<SmallDNA>::new(100, 0.3, 32, 42);
 
     let initial: Vec<SmallDNA> = (0..=255).map(SmallDNA).collect();
     engine.seed_population(initial, &SpreadEval);
@@ -499,7 +503,7 @@ fn test_simple_ga_elitism_clamping_maintains_progress() {
 
 #[test]
 fn test_map_elites_map_to_index_into_buffer() {
-    let engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
 
     // Test buffer-based method produces same results as allocating version
     let descriptor = vec![0.25, 0.75, 0.0, 1.0, 0.5];
@@ -519,7 +523,7 @@ fn test_map_elites_map_to_index_into_buffer() {
 fn test_map_elites_map_to_index_into_reuses_buffer() {
     use std::time::Instant;
 
-    let engine = MapElites::<TestDNA>::new(100, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(100, 0.1, 64, 42);
     let iterations = 10000;
 
     // Pre-allocate buffer
@@ -813,8 +817,7 @@ fn test_nsga2_binary_tournament_works_after_new() {
 /// Test that MapElites step() works correctly with the optimized implementation.
 #[test]
 fn test_map_elites_step_uses_buffer_optimization() {
-    let mut engine = MapElites::<TestDNA>::new(10, 0.3, 42);
-    engine.set_batch_size(32);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.3, 32, 42);
 
     // Seed population
     let initial: Vec<TestDNA> = (0..20).map(|i| TestDNA(i as f32 / 20.0)).collect();
@@ -1070,7 +1073,7 @@ fn test_nsga2_binary_tournament_nan_no_bias() {
 #[test]
 fn test_map_elites_resolution_precision_moderate() {
     // At resolution 1000, f32 has plenty of precision
-    let engine = MapElites::<TestDNA>::new(1000, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(1000, 0.1, 64, 42);
 
     // Test boundary values
     let idx_zero = engine.map_to_index(&[0.0]);
@@ -1094,7 +1097,7 @@ fn test_map_elites_resolution_max_safe() {
     // 2^24 = 16,777,216 is the maximum integer exactly representable in f32
     // We use a smaller value to stay safely within precision limits
     let safe_resolution = 1 << 20; // 1,048,576
-    let engine = MapElites::<TestDNA>::new(safe_resolution, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(safe_resolution, 0.1, 64, 42);
 
     // These should work correctly
     let idx_zero = engine.map_to_index(&[0.0]);
@@ -1121,7 +1124,7 @@ fn test_map_elites_resolution_extreme_documented() {
     // At extremely high resolutions, we accept some precision loss
     // but the algorithm should not panic or produce wildly wrong results
     let extreme_resolution = 1 << 26; // 67,108,864 - beyond f32 precision
-    let engine = MapElites::<TestDNA>::new(extreme_resolution, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(extreme_resolution, 0.1, 64, 42);
 
     // Boundaries should still work
     let idx_zero = engine.map_to_index(&[0.0]);
@@ -1166,7 +1169,7 @@ fn test_map_elites_nan_fitness_rejected_during_seed() {
         }
     }
 
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
 
     // First seed a valid individual with high fitness
     engine.seed_population(vec![TestDNA(0.4)], &NaNFitnessEval); // fitness = 40.0
@@ -1204,8 +1207,7 @@ fn test_map_elites_nan_fitness_rejected_during_step() {
         }
     }
 
-    let mut engine = MapElites::<TestDNA>::new(10, 0.5, 42);
-    engine.set_batch_size(32);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.5, 32, 42);
 
     // Seed with valid individuals
     let initial: Vec<TestDNA> = (1..10).map(|i| TestDNA(i as f32 / 10.0)).collect();
@@ -1248,7 +1250,7 @@ fn test_map_elites_nan_descriptor_rejected() {
         }
     }
 
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
 
     // Seed a valid individual in bin 0
     engine.seed_population(vec![TestDNA(0.05)], &NaNDescriptorEval); // desc = 0.05, maps to bin 0
@@ -1385,7 +1387,7 @@ fn test_map_elites_nan_recovery() {
         }
     }
 
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
 
     // Seed with valid individual
     engine.seed_population(vec![TestDNA(0.3)], &ControlledEval { return_nan: false });

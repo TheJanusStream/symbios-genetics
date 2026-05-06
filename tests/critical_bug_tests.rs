@@ -44,8 +44,7 @@ fn test_map_elites_cache_performance_scales_with_batch_not_archive() {
     // not archive size. With the bug, each step clones the entire archive.
 
     // Use resolution 50 for a 50-bin archive (1D descriptor)
-    let mut engine = MapElites::<TestDNA>::new(50, 0.5, 42);
-    engine.set_batch_size(64);
+    let mut engine = MapElites::<TestDNA>::new(50, 0.5, 64, 42);
 
     struct PerformanceTestEval;
     impl Evaluator<TestDNA> for PerformanceTestEval {
@@ -162,7 +161,7 @@ fn test_nsga2_binary_tournament_provides_selection_pressure() {
 
 #[test]
 fn test_map_elites_archive_is_encapsulated() {
-    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 42);
+    let mut engine = MapElites::<TestDNA>::new(10, 0.1, 64, 42);
     let eval = TestEval;
 
     engine.seed_population(vec![TestDNA(0.5)], &eval);
@@ -190,7 +189,7 @@ fn test_map_elites_uniform_bin_distribution() {
     // resolution=3: bin 0 = [0.0, 0.25), bin 1 = [0.25, 0.75), bin 2 = [0.75, 1.0]
     // With floor(), all bins are equal: [0, 0.333), [0.333, 0.667), [0.667, 1.0]
 
-    let engine = MapElites::<TestDNA>::new(3, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(3, 0.1, 64, 42);
 
     // Test boundary values
     let test_cases = vec![
@@ -219,7 +218,7 @@ fn test_map_elites_uniform_bin_distribution() {
 #[test]
 fn test_map_elites_boundary_bins_equal_size() {
     // Statistical test: with uniform input, each bin should get ~equal samples
-    let engine = MapElites::<TestDNA>::new(5, 0.1, 42);
+    let engine = MapElites::<TestDNA>::new(5, 0.1, 64, 42);
     let mut bin_counts = [0usize; 5];
 
     // Sample uniformly across [0, 1]
@@ -337,7 +336,7 @@ fn test_map_elites_mutation_parallelizable() {
         }
     }
 
-    let mut engine = MapElites::<HeavyDNA>::new(10, 0.5, 42);
+    let mut engine = MapElites::<HeavyDNA>::new(10, 0.5, 64, 42);
     let eval = HeavyEval;
 
     // Large genome to make mutation non-trivial

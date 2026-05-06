@@ -295,7 +295,7 @@ fn bench_map_elites_step(c: &mut Criterion) {
                 let eval = RastriginEval;
                 b.iter_batched(
                     || {
-                        let mut me = MapElites::<FloatVec>::new(res, 0.3, 42);
+                        let mut me = MapElites::<FloatVec>::new(res, 0.3, 64, 42);
                         me.seed_population(population.clone(), &eval);
                         me
                     },
@@ -323,7 +323,7 @@ fn bench_map_elites_seed(c: &mut Criterion) {
                 let population = create_floatvec_population(size, 4, 42);
                 let eval = RastriginEval;
                 b.iter_batched(
-                    || MapElites::<FloatVec>::new(20, 0.3, 42),
+                    || MapElites::<FloatVec>::new(20, 0.3, 64, 42),
                     |mut me| {
                         me.seed_population(population.clone(), &eval);
                         black_box(me)
@@ -342,7 +342,7 @@ fn bench_map_elites_map_to_index(c: &mut Criterion) {
     for dims in [2, 4, 8, 16].iter() {
         group.throughput(Throughput::Elements(*dims as u64));
         group.bench_with_input(BenchmarkId::from_parameter(dims), dims, |b, &d| {
-            let me = MapElites::<FloatVec>::new(100, 0.3, 42);
+            let me = MapElites::<FloatVec>::new(100, 0.3, 64, 42);
             let mut rng = Pcg64::seed_from_u64(42);
             let descriptor: Vec<f32> = (0..d).map(|_| rng.random::<f32>()).collect();
             b.iter(|| black_box(me.map_to_index(&descriptor)));
@@ -364,8 +364,7 @@ fn bench_map_elites_batch_scaling(c: &mut Criterion) {
                 let eval = RastriginEval;
                 b.iter_batched(
                     || {
-                        let mut me = MapElites::<FloatVec>::new(20, 0.3, 42);
-                        me.set_batch_size(batch_size);
+                        let mut me = MapElites::<FloatVec>::new(20, 0.3, batch_size, 42);
                         me.seed_population(population.clone(), &eval);
                         me
                     },

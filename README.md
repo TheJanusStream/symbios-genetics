@@ -8,11 +8,13 @@
 
 The library implements three distinct evolutionary strategies covering the spectrum of optimization needs:
 
-| Algorithm | Type | Best Use Case |
-|-----------|------|---------------|
-| **SimpleGA** | Single-Objective | Converging on a specific optimal solution (e.g., maximizing speed). Features Elitism and Tournament Selection. |
-| **NSGA-II** | Multi-Objective | Finding the *Pareto Front* of trade-offs between conflicting goals (e.g., maximize strength AND minimize weight). |
-| **MAP-Elites** | Quality-Diversity | Illuminating the search space. Finds the best solution for every possible niche (e.g., "fastest robot for every possible height"). |
+| Algorithm          | Type                   | Best Use Case                                                                                                                                            |
+|--------------------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **SimpleGA**       | Single-Objective       | Converging on a specific optimal solution (e.g., maximizing speed). Features Elitism and Tournament Selection.                                           |
+| **NSGA-II**        | Multi-Objective        | Finding the *Pareto Front* of trade-offs between conflicting goals (e.g., maximize strength AND minimize weight).                                        |
+| **MAP-Elites**     | Quality-Diversity      | Illuminating the search space. Finds the best solution for every possible niche (e.g., "fastest robot for every possible height").                       |
+| **CVT-MAP-Elites** | Quality-Diversity      | MAP-Elites for high-dimensional or non-uniform descriptor spaces. Decouples archive size from descriptor dimensionality via a Voronoi tessellation.      |
+| **Novelty Search** | Open-ended exploration | Replaces fitness with kNN behavioural distance. Escapes deceptive local optima where pure fitness search gets stuck. Configurable novelty/fitness blend. |
 
 ## Quick Start
 
@@ -20,12 +22,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-symbios-genetics = "0.1.0"
+symbios-genetics = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.9"
 ```
 
 ### Defining a Genome
+
 Implement the `Genotype` trait for your data structure.
 
 ```rust
@@ -105,16 +108,73 @@ fn main() {
 }
 ```
 
+## Quality-Diversity Metrics & Export
+
+`MapElites` exposes the standard QD metrics and a CSV export of the archive:
+
+```rust,ignore
+use std::fs::File;
+
+let coverage = engine.coverage();   // fraction of cells occupied (0.0..=1.0)
+let qd_score = engine.qd_score();   // sum of fitness across cells
+
+// CSV export requires the `export` feature.
+let mut out = File::create("archive.csv")?;
+engine.export_csv(&mut out)?;
+```
+
+Enable export with:
+
+```toml
+symbios-genetics = { version = "0.2", features = ["export"] }
+```
+
+The CSV has columns `key,descriptor,fitness,objectives,genotype_hash` — one row per occupied cell, in deterministic iteration order. The genotype hash is a 16-hex-char `seahash` of the bincode-serialised genotype, suitable for joining against a separate genotype dump.
+
+> **Note**: `qd_score` is the raw sum of fitness. If your fitness can be negative (e.g. `-distance`), shift it to non-negative before relying on the score for cross-run comparison.
+
+## Pre-made Scorers
+
+The [`scorers`](https://docs.rs/symbios-genetics/latest/symbios_genetics/scorers/) module ships composable building blocks for locomotion / robotics fitness:
+
+- **Concrete scorers** over a [`Trajectory`] struct: `Displacement`, `UpAlignment`, `Height`, `EnergyEfficiency` — and `Const` for literals.
+- **Combinators**: `Multiply`, `Sum`, `Penalize`, `Normalize` for assembling multi-term objectives.
+- **`CompositeEvaluator`** to bridge a scorer composition into the `Evaluator<G>` trait used by every algorithm. The simulator function runs once per genotype; the result is fanned out to fitness, `objectives` (NSGA-II), and `descriptor` (MAP-Elites) signals.
+
+```rust,ignore
+use symbios_genetics::scorers::{
+    CompositeEvaluator, Const, Displacement, EnergyEfficiency, Height,
+    Multiply, Sum, Trajectory, UpAlignment, Scorer,
+};
+
+// locomotion = displacement * up_alignment * (height + 0.5)
+let locomotion = Multiply(
+    Multiply(Displacement, UpAlignment),
+    Sum(Height, Const(0.5_f32)),
+);
+
+let evaluator = CompositeEvaluator::<Robot, Trajectory, _>::new(
+    |robot| run_physics_sim(robot),  // user-supplied: Robot -> Trajectory
+    Box::new(locomotion),
+)
+.with_objectives(vec![Box::new(Displacement), Box::new(EnergyEfficiency)])
+.with_descriptors(vec![Box::new(UpAlignment), Box::new(Height)]);
+```
+
+Behavioural diversity is intentionally not provided as a scorer — it's a population-level signal. Use [`NoveltySearch`](https://docs.rs/symbios-genetics/latest/symbios_genetics/algorithms/novelty_search/) for that.
+
 ## Architecture
 
 ### The `Evolver` Trait
+
 All algorithms implement the `Evolver<G>` trait. This allows you to write simulation harnesses (e.g., a Bevy plugin) that are agnostic to the specific evolutionary strategy. You can hot-swap `SimpleGA` for `MapElites` without rewriting your game loop.
 
 ### Parallelism
+
 To enable parallel evaluation, ensure the `parallel` feature is enabled (default) and your `Evaluator` implements `Send + Sync`. The engine automatically dispatches evaluation tasks via `rayon::par_iter`.
 
 ```toml
-symbios-genetics = { version = "0.1.0", features = ["parallel"] }
+symbios-genetics = { version = "0.2", features = ["parallel"] }
 ```
 
 ## License

@@ -281,10 +281,19 @@ pub trait Evolver<G: Genotype> {
 /// - [`nsga2::Nsga2`](algorithms::nsga2::Nsga2) - NSGA-II for multi-objective optimization
 /// - [`map_elites::MapElites`](algorithms::map_elites::MapElites) - MAP-Elites for quality-diversity optimization
 pub mod algorithms {
+    /// Internal cell-keyed archive shared by MAP-Elites variants.
+    pub(crate) mod archive;
+    /// CVT-MAP-Elites: MAP-Elites with a Voronoi-tessellated behaviour space.
+    pub mod cvt_map_elites;
     /// Simple generational genetic algorithm.
     pub mod map_elites;
+    /// Novelty search (Lehman & Stanley).
+    pub mod novelty_search;
     /// NSGA-II multi-objective evolutionary algorithm.
     pub mod nsga2;
     /// Simple genetic algorithm with elitism.
     pub mod simple;
 }
+
+/// Pre-made composable scorers for locomotion / robotics evolution.
+pub mod scorers;

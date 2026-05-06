@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn test_map_elites_index_mapping() {
-        let engine = MapElites::<MockDNA>::new(10, 0.1, 42);
+        let engine = MapElites::<MockDNA>::new(10, 0.1, 64, 42);
         assert_eq!(engine.map_to_index(&[0.0]), vec![0]);
         assert_eq!(engine.map_to_index(&[1.0]), vec![9]);
     }

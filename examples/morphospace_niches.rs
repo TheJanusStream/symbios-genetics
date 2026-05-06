@@ -51,8 +51,7 @@ fn main() {
     let mutation_rate = 0.2;
     let resolution = 10; // 10x10 grid = 100 niches
 
-    let mut engine = MapElites::new(resolution, mutation_rate, 42);
-    engine.set_batch_size(50);
+    let mut engine = MapElites::new(resolution, mutation_rate, 50, 42);
     let eval = ShapeEvaluator;
 
     // 1. Initial Seeding: Use seed_population for proper encapsulation

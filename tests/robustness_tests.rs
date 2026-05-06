@@ -206,15 +206,12 @@ fn test_nsga2_crowding_distance_single_objective_all_same() {
 // ============================================================================
 
 #[test]
-fn test_map_elites_default_batch_size_is_reasonable() {
-    let me = MapElites::<TestDNA>::new(10, 0.1, 42);
-
-    // batch_size of 1 defeats the purpose of parallel evaluation
-    // It should default to something reasonable (e.g., 32, 64, or num_cpus)
-    assert!(
-        me.batch_size() > 1,
-        "Default batch_size should be > 1 for effective parallelism, got {}",
-        me.batch_size()
+fn test_map_elites_constructor_batch_size_round_trip() {
+    let me = MapElites::<TestDNA>::new(10, 0.1, 32, 42);
+    assert_eq!(
+        me.batch_size(),
+        32,
+        "batch_size() should reflect the value passed to new()"
     );
 }
 
@@ -222,8 +219,7 @@ fn test_map_elites_default_batch_size_is_reasonable() {
 fn test_map_elites_large_archive_performance() {
     use std::time::Instant;
 
-    let mut me = MapElites::<TestDNA>::new(100, 0.1, 42);
-    me.set_batch_size(32);
+    let mut me = MapElites::<TestDNA>::new(100, 0.1, 32, 42);
 
     struct FastEval;
     impl Evaluator<TestDNA> for FastEval {
