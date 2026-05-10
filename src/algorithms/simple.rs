@@ -96,6 +96,17 @@ fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
     }
 }
 
+/// Internal representation for serialization with validating deserializer.
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "G: Genotype")]
+struct SimpleGAData<G: Genotype> {
+    population: Vec<Phenotype<G>>,
+    pop_size: usize,
+    mutation_rate: f32,
+    elitism: usize,
+    rng: Pcg64,
+}
+
 /// Simple generational genetic algorithm with elitism.
 ///
 /// A classic genetic algorithm that maintains a fixed-size population and
@@ -114,14 +125,62 @@ fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
 ///
 /// The top `elitism` individuals (by fitness) are copied unchanged to the
 /// next generation, ensuring the best solutions are never lost.
-#[derive(Serialize, Deserialize)]
-#[serde(bound = "G: Genotype")]
 pub struct SimpleGA<G: Genotype> {
     population: Vec<Phenotype<G>>,
     pop_size: usize,
     mutation_rate: f32,
     elitism: usize,
     rng: Pcg64,
+}
+
+impl<G: Genotype> Serialize for SimpleGA<G> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("SimpleGA", 5)?;
+        state.serialize_field("population", &self.population)?;
+        state.serialize_field("pop_size", &self.pop_size)?;
+        state.serialize_field("mutation_rate", &self.mutation_rate)?;
+        state.serialize_field("elitism", &self.elitism)?;
+        state.serialize_field("rng", &self.rng)?;
+        state.end()
+    }
+}
+
+impl<'de, G: Genotype> Deserialize<'de> for SimpleGA<G> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let data = SimpleGAData::<G>::deserialize(deserializer)?;
+
+        // pop_size must equal population.len(). The step() loop runs until
+        // next_gen.len() reaches pop_size, so a desynced pop_size is an OOM
+        // vector (e.g. pop_size = usize::MAX with a tiny population).
+        if data.pop_size != data.population.len() {
+            return Err(D::Error::custom(format!(
+                "pop_size ({}) does not match population length ({})",
+                data.pop_size,
+                data.population.len()
+            )));
+        }
+
+        if data.mutation_rate.is_nan() || data.mutation_rate.is_infinite() {
+            return Err(D::Error::custom("mutation_rate must be a finite number"));
+        }
+
+        Ok(Self {
+            population: data.population,
+            pop_size: data.pop_size,
+            mutation_rate: data.mutation_rate,
+            elitism: data.elitism,
+            rng: data.rng,
+        })
+    }
 }
 
 impl<G: Genotype> SimpleGA<G> {

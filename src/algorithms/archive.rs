@@ -8,7 +8,7 @@
 use crate::{Genotype, Phenotype};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Cell-keyed elite archive.
 ///
@@ -139,14 +139,24 @@ impl<G: Genotype> Archive<G> {
 
     /// Validate that `keys_vec` is in sync with `cells`. Called after
     /// deserialization to reject malicious or corrupted state.
+    ///
+    /// Length-equality plus a one-sided "every keys_vec entry is in cells"
+    /// check is *not* sufficient: `keys_vec = [K, K]` against
+    /// `cells = {K, K'}` passes both, leaving `K'` permanently unsampleable
+    /// from `sample_key`. We must also ensure `keys_vec` has no duplicates,
+    /// which (with matching lengths) makes the two collections equal as sets.
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.cells.len() != self.keys_vec.len() {
+            return Err("archive_keys_vec length does not match archive size");
+        }
+        let mut seen: BTreeSet<&Vec<usize>> = BTreeSet::new();
         for key in &self.keys_vec {
             if !self.cells.contains_key(key) {
                 return Err("archive_keys_vec contains key not present in archive");
             }
-        }
-        if self.cells.len() != self.keys_vec.len() {
-            return Err("archive_keys_vec length does not match archive size");
+            if !seen.insert(key) {
+                return Err("archive_keys_vec contains duplicate keys");
+            }
         }
         Ok(())
     }

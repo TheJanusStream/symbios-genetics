@@ -136,14 +136,29 @@ fn cmp_f32_nan_last(a: f32, b: f32) -> Ordering {
     }
 }
 
-/// Novelty search evolver.
-///
-/// See module docs for algorithm and knob descriptions.
+/// Internal representation for serialization with validating deserializer.
 #[derive(Serialize, Deserialize)]
 #[serde(bound(
     serialize = "G: Genotype, D: BehaviourDistance + Serialize",
     deserialize = "G: Genotype, D: BehaviourDistance + Deserialize<'de>"
 ))]
+struct NoveltySearchData<G: Genotype, D: BehaviourDistance> {
+    population: Vec<Phenotype<G>>,
+    pop_size: usize,
+    novelty: Vec<f32>,
+    behaviour_archive: Vec<Vec<f32>>,
+    mutation_rate: f32,
+    elitism: usize,
+    k: usize,
+    alpha: f32,
+    policy: ArchivePolicy,
+    distance: D,
+    rng: Pcg64,
+}
+
+/// Novelty search evolver.
+///
+/// See module docs for algorithm and knob descriptions.
 pub struct NoveltySearch<G: Genotype, D: BehaviourDistance = EuclideanDistance> {
     population: Vec<Phenotype<G>>,
     pop_size: usize,
@@ -159,6 +174,89 @@ pub struct NoveltySearch<G: Genotype, D: BehaviourDistance = EuclideanDistance> 
     policy: ArchivePolicy,
     distance: D,
     rng: Pcg64,
+}
+
+impl<G: Genotype, D: BehaviourDistance + Serialize> Serialize for NoveltySearch<G, D> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("NoveltySearch", 11)?;
+        state.serialize_field("population", &self.population)?;
+        state.serialize_field("pop_size", &self.pop_size)?;
+        state.serialize_field("novelty", &self.novelty)?;
+        state.serialize_field("behaviour_archive", &self.behaviour_archive)?;
+        state.serialize_field("mutation_rate", &self.mutation_rate)?;
+        state.serialize_field("elitism", &self.elitism)?;
+        state.serialize_field("k", &self.k)?;
+        state.serialize_field("alpha", &self.alpha)?;
+        state.serialize_field("policy", &self.policy)?;
+        state.serialize_field("distance", &self.distance)?;
+        state.serialize_field("rng", &self.rng)?;
+        state.end()
+    }
+}
+
+impl<'de, G: Genotype, D: BehaviourDistance + Deserialize<'de>> Deserialize<'de>
+    for NoveltySearch<G, D>
+{
+    fn deserialize<De>(deserializer: De) -> Result<Self, De::Error>
+    where
+        De: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let data = NoveltySearchData::<G, D>::deserialize(deserializer)?;
+
+        // pop_size must match population length. The step() loop runs until
+        // next_gen.len() reaches pop_size — a desynced pop_size is an OOM
+        // vector (e.g. pop_size = usize::MAX with a tiny population).
+        if data.pop_size != data.population.len() {
+            return Err(De::Error::custom(format!(
+                "pop_size ({}) does not match population length ({})",
+                data.pop_size,
+                data.population.len()
+            )));
+        }
+
+        // Re-run the same hyper-parameter validation as NoveltyConfig::new,
+        // closing the silent-corruption window where k=0 produced 0/0=NaN
+        // and an out-of-range alpha skewed selection.
+        let cfg = NoveltyConfig {
+            k: data.k,
+            alpha: data.alpha,
+            policy: data.policy,
+        };
+        cfg.validate().map_err(De::Error::custom)?;
+
+        if data.mutation_rate.is_nan() || data.mutation_rate.is_infinite() {
+            return Err(De::Error::custom("mutation_rate must be a finite number"));
+        }
+
+        // novelty is either empty (pre-first-step) or aligned with population.
+        if !data.novelty.is_empty() && data.novelty.len() != data.population.len() {
+            return Err(De::Error::custom(format!(
+                "novelty length ({}) does not match population length ({})",
+                data.novelty.len(),
+                data.population.len()
+            )));
+        }
+
+        Ok(Self {
+            population: data.population,
+            pop_size: data.pop_size,
+            novelty: data.novelty,
+            behaviour_archive: data.behaviour_archive,
+            mutation_rate: data.mutation_rate,
+            elitism: data.elitism,
+            k: data.k,
+            alpha: data.alpha,
+            policy: data.policy,
+            distance: data.distance,
+            rng: data.rng,
+        })
+    }
 }
 
 impl<G: Genotype> NoveltySearch<G, EuclideanDistance> {

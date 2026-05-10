@@ -459,12 +459,21 @@ impl<G: Genotype> Nsga2<G> {
                 combined[front[n - 1].index].objectives[m] - combined[front[0].index].objectives[m];
             front[0].distance = f32::INFINITY;
             front[n - 1].distance = f32::INFINITY;
-            if range > 0.0 {
+            // Skip non-finite ranges: with infinite or NaN objectives at the
+            // boundary, the normalized contribution `(±∞ − finite)/±∞`
+            // collapses to NaN. Since `total_cmp` ranks NaN above
+            // `f32::INFINITY`, leaking a single NaN distance would let an
+            // interior point outrank genuine boundary points and subvert the
+            // crowding heuristic.
+            if range > 0.0 && range.is_finite() {
                 for i in 1..(n - 1) {
                     if front[i].distance != f32::INFINITY {
-                        front[i].distance += (combined[front[i + 1].index].objectives[m]
+                        let contribution = (combined[front[i + 1].index].objectives[m]
                             - combined[front[i - 1].index].objectives[m])
                             / range;
+                        if contribution.is_finite() {
+                            front[i].distance += contribution;
+                        }
                     }
                 }
             }

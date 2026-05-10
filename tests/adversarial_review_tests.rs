@@ -1425,3 +1425,327 @@ fn test_map_elites_nan_recovery() {
         final_fitness
     );
 }
+
+// ============================================================================
+// Issue #58: Unvalidated Deserialization (DoS via OOM, silent corruption,
+//            archive parent starvation, crowding-distance NaN contamination)
+// Review: Critical - bypasses constructor invariants for SimpleGA & NoveltySearch,
+//         flawed Archive::validate accepts duplicate keys_vec, and NSGA-II
+//         crowding distance leaks NaN to outrank boundary points.
+// ============================================================================
+
+/// Mirror of internal SimpleGA serialized layout for crafting malicious payloads.
+#[derive(Serialize, Deserialize)]
+struct MaliciousSimpleGAData {
+    population: Vec<Phenotype<TestDNA>>,
+    pop_size: usize,
+    mutation_rate: f32,
+    elitism: usize,
+    rng: Pcg64,
+}
+
+/// Issue 1: SimpleGA must reject deserialization where `pop_size` exceeds
+/// the actual population length. Without validation, `step()` would loop
+/// allocating offspring until the host process OOMs.
+#[test]
+fn test_simple_ga_deserialize_rejects_oversized_pop_size() {
+    let pheno = Phenotype {
+        genotype: TestDNA(0.1),
+        fitness: 0.1,
+        objectives: vec![0.1],
+        descriptor: vec![],
+    };
+
+    // 1 individual, but pop_size claims usize::MAX -> step() would OOM.
+    let malicious = MaliciousSimpleGAData {
+        population: vec![pheno],
+        pop_size: usize::MAX,
+        mutation_rate: 0.1,
+        elitism: 0,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<SimpleGA<TestDNA>, _> = bincode::deserialize(&serialized);
+
+    let err = result
+        .err()
+        .expect("desynced pop_size should be rejected, not silently accepted");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("pop_size"),
+        "Error should mention pop_size validation. Got: {msg}"
+    );
+}
+
+/// Issue 1: SimpleGA must also reject NaN/infinite mutation_rate, which would
+/// poison every probability check inside `mutate`.
+#[test]
+fn test_simple_ga_deserialize_rejects_nan_mutation_rate() {
+    let pheno = Phenotype {
+        genotype: TestDNA(0.1),
+        fitness: 0.1,
+        objectives: vec![0.1],
+        descriptor: vec![],
+    };
+
+    let malicious = MaliciousSimpleGAData {
+        population: vec![pheno],
+        pop_size: 1,
+        mutation_rate: f32::NAN,
+        elitism: 0,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<SimpleGA<TestDNA>, _> = bincode::deserialize(&serialized);
+    assert!(
+        result.is_err(),
+        "NaN mutation_rate should be rejected at deserialization time"
+    );
+}
+
+use symbios_genetics::algorithms::novelty_search::{ArchivePolicy, NoveltySearch};
+
+/// Mirror of internal NoveltySearch serialized layout. Field order matches
+/// the field-order of the manual Serialize impl, so bincode round-trips.
+#[derive(Serialize, Deserialize)]
+struct MaliciousNoveltySearchData {
+    population: Vec<Phenotype<TestDNA>>,
+    pop_size: usize,
+    novelty: Vec<f32>,
+    behaviour_archive: Vec<Vec<f32>>,
+    mutation_rate: f32,
+    elitism: usize,
+    k: usize,
+    alpha: f32,
+    policy: ArchivePolicy,
+    distance: symbios_genetics::algorithms::novelty_search::EuclideanDistance,
+    rng: Pcg64,
+}
+
+fn make_novelty_pheno(v: f32) -> Phenotype<TestDNA> {
+    Phenotype {
+        genotype: TestDNA(v),
+        fitness: v,
+        objectives: vec![v],
+        descriptor: vec![v.clamp(0.0, 1.0)],
+    }
+}
+
+/// Issue 1: NoveltySearch must reject deserialization where `pop_size`
+/// exceeds population length. Same OOM vector as SimpleGA.
+#[test]
+fn test_novelty_search_deserialize_rejects_oversized_pop_size() {
+    let malicious = MaliciousNoveltySearchData {
+        population: vec![make_novelty_pheno(0.1)],
+        pop_size: usize::MAX,
+        novelty: vec![],
+        behaviour_archive: vec![],
+        mutation_rate: 0.1,
+        elitism: 0,
+        k: 5,
+        alpha: 1.0,
+        policy: ArchivePolicy::AlwaysAdd,
+        distance: symbios_genetics::algorithms::novelty_search::EuclideanDistance,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<NoveltySearch<TestDNA>, _> = bincode::deserialize(&serialized);
+    let err = result
+        .err()
+        .expect("desynced pop_size should be rejected for NoveltySearch");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("pop_size"),
+        "Error should mention pop_size validation. Got: {msg}"
+    );
+}
+
+/// Issue 2: NoveltySearch must reject deserialization with `k = 0`. Inside
+/// `mean_knn_distance`, `take` becomes 0 and `sum / 0` produces NaN — the
+/// novelty array fills with NaN and selection collapses to a random walk.
+#[test]
+fn test_novelty_search_deserialize_rejects_zero_k() {
+    let malicious = MaliciousNoveltySearchData {
+        population: vec![make_novelty_pheno(0.1)],
+        pop_size: 1,
+        novelty: vec![],
+        behaviour_archive: vec![],
+        mutation_rate: 0.1,
+        elitism: 0,
+        k: 0,
+        alpha: 1.0,
+        policy: ArchivePolicy::AlwaysAdd,
+        distance: symbios_genetics::algorithms::novelty_search::EuclideanDistance,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<NoveltySearch<TestDNA>, _> = bincode::deserialize(&serialized);
+    let err = result
+        .err()
+        .expect("k = 0 must be rejected — the algorithm would silently emit NaN novelty");
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains("k must"),
+        "Error should mention k validation. Got: {msg}"
+    );
+}
+
+/// Issue 2: NoveltySearch must reject `alpha` outside [0, 1] — runs mid-way
+/// through the algorithm don't sanitise alpha and the blended score becomes
+/// meaningless.
+#[test]
+fn test_novelty_search_deserialize_rejects_out_of_range_alpha() {
+    let malicious = MaliciousNoveltySearchData {
+        population: vec![make_novelty_pheno(0.1)],
+        pop_size: 1,
+        novelty: vec![],
+        behaviour_archive: vec![],
+        mutation_rate: 0.1,
+        elitism: 0,
+        k: 5,
+        alpha: 2.5,
+        policy: ArchivePolicy::AlwaysAdd,
+        distance: symbios_genetics::algorithms::novelty_search::EuclideanDistance,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<NoveltySearch<TestDNA>, _> = bincode::deserialize(&serialized);
+    assert!(
+        result.is_err(),
+        "alpha outside [0,1] should be rejected at deserialization"
+    );
+}
+
+/// Issue 3: Archive::validate must detect duplicate entries in
+/// `archive_keys_vec`. Length-equality plus a one-sided "every keys_vec
+/// entry is in cells" check let `keys_vec = [K, K]` paired with
+/// `cells = {K, K'}` slip through, permanently starving K' from
+/// `sample_key`.
+#[test]
+fn test_map_elites_deserialize_rejects_duplicate_keys_vec() {
+    let pheno_a = Phenotype {
+        genotype: TestDNA(0.1),
+        fitness: 0.1,
+        objectives: vec![0.1],
+        descriptor: vec![0.1],
+    };
+    let pheno_b = Phenotype {
+        genotype: TestDNA(0.9),
+        fitness: 0.9,
+        objectives: vec![0.9],
+        descriptor: vec![0.9],
+    };
+
+    let mut archive = BTreeMap::new();
+    archive.insert(vec![1usize], pheno_a);
+    archive.insert(vec![9usize], pheno_b);
+
+    // Lengths match (2 == 2) and every key in keys_vec exists in cells.
+    // The bypass: keys_vec contains [1] twice, hiding [9] from sample_key.
+    let malicious = MaliciousMapElitesData {
+        archive,
+        archive_keys_vec: vec![vec![1], vec![1]],
+        resolution: 10,
+        mutation_rate: 0.1,
+        batch_size: 64,
+        rng: Pcg64::seed_from_u64(42),
+    };
+
+    let serialized = bincode::serialize(&malicious).unwrap();
+    let result: Result<MapElites<TestDNA>, _> = bincode::deserialize(&serialized);
+    let err = result.err().expect(
+        "Duplicate keys_vec entries against asymmetric cells must be rejected — \
+         this is the parent-starvation desync.",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("duplicate"),
+        "Error should mention duplicate detection. Got: {msg}"
+    );
+}
+
+/// Issue 4: NSGA-II crowding distance must not propagate NaN when an
+/// objective contains `+Infinity`. The recipe: front[n-1] objective is
+/// +Infinity, an interior neighbour is also +Infinity; the standard
+/// `(neighbour_diff) / range` math evaluates to `+∞ / +∞ = NaN`. Because
+/// `total_cmp` ranks NaN above `f32::INFINITY`, the NaN-distance interior
+/// point would outrank actual boundary points.
+#[test]
+fn test_nsga2_crowding_distance_rejects_nan_from_infinity() {
+    use symbios_genetics::algorithms::nsga2::SortWrapper;
+
+    // Build a 4-individual front. Sort by total_cmp puts +Inf at the end,
+    // so after sorting we expect order: [0.0, 1.0, +Inf, +Inf]. The
+    // interior point at index 2 has +Inf as its objective and its forward
+    // neighbour (index 3) is also +Inf. Without the fix, distance becomes
+    // NaN; with the fix, the +Inf-range branch is skipped and distance
+    // stays at the prior accumulator (0.0 here, since we have only one
+    // objective).
+    let combined = vec![
+        Phenotype {
+            genotype: TestDNA(0.0),
+            fitness: 0.0,
+            objectives: vec![0.0],
+            descriptor: vec![],
+        },
+        Phenotype {
+            genotype: TestDNA(1.0),
+            fitness: 1.0,
+            objectives: vec![1.0],
+            descriptor: vec![],
+        },
+        Phenotype {
+            genotype: TestDNA(2.0),
+            fitness: 2.0,
+            objectives: vec![f32::INFINITY],
+            descriptor: vec![],
+        },
+        Phenotype {
+            genotype: TestDNA(3.0),
+            fitness: 3.0,
+            objectives: vec![f32::INFINITY],
+            descriptor: vec![],
+        },
+    ];
+
+    let mut front: Vec<SortWrapper> = (0..4)
+        .map(|i| SortWrapper {
+            index: i,
+            rank: 0,
+            distance: 0.0,
+        })
+        .collect();
+
+    Nsga2::<TestDNA>::calculate_crowding_distance(&mut front, &combined);
+
+    for w in &front {
+        assert!(
+            !w.distance.is_nan(),
+            "crowding distance must not be NaN — NaN ranks above +INFINITY \
+             in total_cmp, subverting boundary-point selection. \
+             Got distance = NaN at index {} (objective = {})",
+            w.index,
+            combined[w.index].objectives[0]
+        );
+    }
+
+    // Boundary points (smallest and largest objective) must still be marked
+    // as +INFINITY so the heuristic preserves diversity.
+    let extreme_distances: Vec<f32> = front
+        .iter()
+        .filter(|w| {
+            let v = combined[w.index].objectives[0];
+            v == 0.0 || v == f32::INFINITY
+        })
+        .map(|w| w.distance)
+        .collect();
+    assert!(
+        extreme_distances.contains(&f32::INFINITY),
+        "boundary points must retain INFINITY distance even when range is non-finite"
+    );
+}
