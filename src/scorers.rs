@@ -6,18 +6,22 @@
 //!
 //! # Architecture
 //!
-//! - [`Scorer<S, O>`] — generic trait: given state `S`, return a numeric
-//!   score of type `O: NumLike`.
-//! - [`Trajectory`] — a fixed bundle of physical quantities (start/end
-//!   position, up-vector, max height, energy used, final descriptor)
-//!   covering the common case. Concrete scorers in this module operate
-//!   on `Trajectory`. Users with exotic state types implement `Scorer`
-//!   for their own state.
-//! - **Combinators** — [`Multiply`], [`Sum`], [`Penalize`], [`Normalize`]
-//!   compose simpler scorers into multi-term objectives.
-//! - [`CompositeEvaluator`] — bridges scorers into the existing
-//!   [`Evaluator`](crate::Evaluator) trait, so the same scorer composition
-//!   feeds [`SimpleGA`](crate::algorithms::simple::SimpleGA),
+//! - [`Scorer<S, O>`](crate::scorers::Scorer) — generic trait: given state `S`,
+//!   return a numeric score of type `O: NumLike`.
+//! - [`Trajectory`](crate::scorers::Trajectory) — a fixed bundle of physical
+//!   quantities (start/end position, up-vector, max height, energy used, final
+//!   descriptor) covering the common case. Concrete scorers in this module
+//!   operate on `Trajectory`. Users with exotic state types implement
+//!   [`Scorer`](crate::scorers::Scorer) for their own state.
+//! - **Combinators** — [`Multiply`](crate::scorers::Multiply),
+//!   [`Sum`](crate::scorers::Sum),
+//!   [`Penalize`](crate::scorers::Penalize),
+//!   [`Normalize`](crate::scorers::Normalize) compose simpler scorers into
+//!   multi-term objectives.
+//! - [`CompositeEvaluator`](crate::scorers::CompositeEvaluator) — bridges
+//!   scorers into the existing [`Evaluator`](crate::Evaluator) trait, so the
+//!   same scorer composition feeds
+//!   [`SimpleGA`](crate::algorithms::simple::SimpleGA),
 //!   [`Nsga2`](crate::algorithms::nsga2::Nsga2), and the MAP-Elites family.
 //!
 //! # Why no `BehaviouralDiversity` scorer?
@@ -89,8 +93,8 @@ pub trait NumLike:
     const ONE: Self;
     /// Convert from `f32` (used by combinators that need a literal).
     fn from_f32(v: f32) -> Self;
-    /// Convert to `f32` (used by [`CompositeEvaluator`] when bridging to
-    /// the [`Evaluator`](crate::Evaluator) trait).
+    /// Convert to `f32` (used by [`CompositeEvaluator`] when bridging to the
+    /// [`Evaluator`] trait).
     fn to_f32(self) -> f32;
 
     /// Clamp `self` into `[lo, hi]`, treating NaN-like values per

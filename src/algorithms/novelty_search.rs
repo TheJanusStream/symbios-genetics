@@ -17,7 +17,7 @@
 //!    `alpha = 1.0` is pure novelty search; `alpha = 0.0` is fitness-only;
 //!    intermediate values blend the two ("novelty + fitness" hybrid).
 //! 4. Optionally add each descriptor to the behaviour archive according to
-//!    the chosen [`ArchivePolicy`].
+//!    the chosen [`ArchivePolicy`](crate::algorithms::novelty_search::ArchivePolicy).
 //! 5. Tournament-select on the score, crossover, mutate, with elitism.
 //!
 //! # Knobs

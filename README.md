@@ -144,7 +144,7 @@ The [`scorers`](https://docs.rs/symbios-genetics/latest/symbios_genetics/scorers
 ```rust,ignore
 use symbios_genetics::scorers::{
     CompositeEvaluator, Const, Displacement, EnergyEfficiency, Height,
-    Multiply, Sum, Trajectory, UpAlignment, Scorer,
+    Multiply, Sum, Trajectory, UpAlignment,
 };
 
 // locomotion = displacement * up_alignment * (height + 0.5)
@@ -162,6 +162,31 @@ let evaluator = CompositeEvaluator::<Robot, Trajectory, _>::new(
 ```
 
 Behavioural diversity is intentionally not provided as a scorer — it's a population-level signal. Use [`NoveltySearch`](https://docs.rs/symbios-genetics/latest/symbios_genetics/algorithms/novelty_search/) for that.
+
+## Speciation
+
+The [`speciation`](https://docs.rs/symbios-genetics/latest/symbios_genetics/speciation/) module is a standalone NEAT-style speciation primitive that operates on a `&mut [Phenotype<G>]`. You supply a `CompatibilityDistance<G>` metric; `Speciation` clusters the population by that distance, applies Stanley & Miikkulainen *explicit fitness sharing* (each phenotype's fitness is divided by its species size), and adapts the compatibility threshold each generation toward a configured target species count.
+
+It is genotype-agnostic and not coupled to a specific [`Evolver`] — drive it from your own selection loop, or against a population you maintain alongside an engine.
+
+```rust,ignore
+use symbios_genetics::{Phenotype, speciation::{CompatibilityDistance, Speciation}};
+
+struct Euclidean;
+impl CompatibilityDistance<MyDNA> for Euclidean {
+    fn distance(&self, a: &MyDNA, b: &MyDNA) -> f32 { /* ... */ 0.0 }
+}
+
+let mut spec = Speciation::new(Euclidean, /*initial_threshold*/ 0.5, /*target_count*/ 8);
+let mut pop: Vec<Phenotype<MyDNA>> = /* evaluated population you own */ vec![];
+
+// Each generation, after evaluation:
+spec.assign(&pop);
+spec.share_fitness(&mut pop);
+spec.adjust_threshold();
+```
+
+Species IDs are stable across generations as long as a representative survives, making it straightforward to track lineage. See the module docs for the algorithm sketch and tuning knobs (`with_threshold_step`, `with_min_threshold`).
 
 ## Architecture
 

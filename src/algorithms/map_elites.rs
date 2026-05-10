@@ -482,9 +482,9 @@ impl<G: Genotype> MapElites<G> {
 
     /// Maps a behavioral descriptor into a pre-allocated buffer.
     ///
-    /// This is an allocation-free alternative to [`map_to_index`] for
-    /// high-throughput use cases. The buffer must have at least as many
-    /// elements as the descriptor.
+    /// This is an allocation-free alternative to
+    /// [`map_to_index`](Self::map_to_index) for high-throughput use cases.
+    /// The buffer must have at least as many elements as the descriptor.
     ///
     /// # Arguments
     ///

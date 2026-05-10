@@ -8,7 +8,11 @@
 //! - **Deterministic Execution**: Bit-perfect reproducibility across runs with seeded RNG
 //! - **Serializable State**: Save and restore evolution state via Serde
 //! - **Parallel Evaluation**: Optional parallel fitness evaluation via Rayon
-//! - **Multiple Algorithms**: Simple GA, NSGA-II, and MAP-Elites
+//! - **Multiple Algorithms**: Simple GA, NSGA-II, MAP-Elites, CVT-MAP-Elites, Novelty Search
+//! - **Composable Scorers**: Pre-made fitness building blocks for locomotion / robotics
+//!   (see [`scorers`])
+//! - **Speciation**: Generic NEAT-style fitness sharing with a dynamic compatibility
+//!   threshold (see [`speciation`])
 //!
 //! ## Quick Start
 //!
@@ -61,11 +65,17 @@
 //! |-----------|----------|-------------|
 //! | [`SimpleGA`](algorithms::simple::SimpleGA) | Single-objective optimization | Fast, simple, elitism support |
 //! | [`Nsga2`](algorithms::nsga2::Nsga2) | Multi-objective optimization | Pareto front discovery |
-//! | [`MapElites`](algorithms::map_elites::MapElites) | Quality-diversity | Behavioral diversity archive |
+//! | [`MapElites`](algorithms::map_elites::MapElites) | Quality-diversity | Grid-based behavioural archive |
+//! | [`CvtMapElites`](algorithms::cvt_map_elites::CvtMapElites) | Quality-diversity | Voronoi tessellation; decouples archive size from descriptor dimensionality |
+//! | [`NoveltySearch`](algorithms::novelty_search::NoveltySearch) | Open-ended exploration | kNN behavioural distance; escapes deceptive optima |
 //!
 //! ## Feature Flags
 //!
 //! - `parallel` (default): Enable parallel fitness evaluation using Rayon
+//! - `export`: Enable archive CSV export
+//!   ([`MapElites::export_csv`](algorithms::map_elites::MapElites::export_csv),
+//!   [`CvtMapElites::export_csv`](algorithms::cvt_map_elites::CvtMapElites::export_csv));
+//!   pulls in `bincode` and `seahash` for stable genotype hashes.
 //!
 //! ## Serialization
 //!
@@ -275,23 +285,25 @@ pub trait Evolver<G: Genotype> {
 
 /// Evolutionary algorithm implementations.
 ///
-/// This module contains three evolutionary algorithms:
+/// This module contains the following evolutionary algorithms:
 ///
-/// - [`simple::SimpleGA`](algorithms::simple::SimpleGA) - A simple generational genetic algorithm with elitism
-/// - [`nsga2::Nsga2`](algorithms::nsga2::Nsga2) - NSGA-II for multi-objective optimization
-/// - [`map_elites::MapElites`](algorithms::map_elites::MapElites) - MAP-Elites for quality-diversity optimization
+/// - [`simple::SimpleGA`](algorithms::simple::SimpleGA) — Generational GA with elitism (single-objective)
+/// - [`nsga2::Nsga2`](algorithms::nsga2::Nsga2) — NSGA-II for multi-objective optimisation
+/// - [`map_elites::MapElites`](algorithms::map_elites::MapElites) — Grid-based MAP-Elites quality-diversity
+/// - [`cvt_map_elites::CvtMapElites`](algorithms::cvt_map_elites::CvtMapElites) — MAP-Elites variant using a Centroidal Voronoi Tessellation
+/// - [`novelty_search::NoveltySearch`](algorithms::novelty_search::NoveltySearch) — Lehman & Stanley novelty-driven search
 pub mod algorithms {
     /// Internal cell-keyed archive shared by MAP-Elites variants.
     pub(crate) mod archive;
     /// CVT-MAP-Elites: MAP-Elites with a Voronoi-tessellated behaviour space.
     pub mod cvt_map_elites;
-    /// Simple generational genetic algorithm.
+    /// MAP-Elites quality-diversity algorithm with a regular descriptor-space grid.
     pub mod map_elites;
     /// Novelty search (Lehman & Stanley).
     pub mod novelty_search;
     /// NSGA-II multi-objective evolutionary algorithm.
     pub mod nsga2;
-    /// Simple genetic algorithm with elitism.
+    /// Simple generational genetic algorithm with elitism.
     pub mod simple;
 }
 

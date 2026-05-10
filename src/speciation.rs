@@ -1,25 +1,29 @@
 //! Speciation primitives for population-based evolutionary algorithms.
 //!
 //! Speciation clusters genotypes into species based on a user-supplied
-//! [`CompatibilityDistance`] metric, allowing fitness sharing within niches
-//! and a dynamic threshold that targets a configured species count.
+//! [`CompatibilityDistance`](crate::speciation::CompatibilityDistance) metric,
+//! allowing fitness sharing within niches and a dynamic threshold that targets
+//! a configured species count.
 //!
 //! This module is genotype-agnostic: the caller supplies the distance metric.
 //! The classic NEAT (Stanley & Miikkulainen, 2002) usage is to wrap a
 //! topology-genome's `compatibility_distance` method in a
-//! [`CompatibilityDistance`] impl and feed it to [`Speciation`].
+//! [`CompatibilityDistance`](crate::speciation::CompatibilityDistance) impl and
+//! feed it to [`Speciation`](crate::speciation::Speciation).
 //!
 //! # Algorithm sketch
 //!
 //! Each generation:
-//! 1. [`Speciation::assign`] walks the population. Each phenotype is placed in
-//!    the first existing species whose representative is within `threshold`
-//!    distance, or a new species is created.
-//! 2. [`Speciation::share_fitness`] divides each phenotype's `fitness` by its
-//!    species size — Stanley's *explicit fitness sharing*, which prevents any
-//!    one species from dominating the population.
-//! 3. [`Speciation::adjust_threshold`] nudges `threshold` up or down by
-//!    `threshold_step` to drive the species count toward `target_count`.
+//! 1. [`Speciation::assign`](crate::speciation::Speciation::assign) walks the
+//!    population. Each phenotype is placed in the first existing species whose
+//!    representative is within `threshold` distance, or a new species is created.
+//! 2. [`Speciation::share_fitness`](crate::speciation::Speciation::share_fitness)
+//!    divides each phenotype's `fitness` by its species size — Stanley's
+//!    *explicit fitness sharing*, which prevents any one species from
+//!    dominating the population.
+//! 3. [`Speciation::adjust_threshold`](crate::speciation::Speciation::adjust_threshold)
+//!    nudges `threshold` up or down by `threshold_step` to drive the species
+//!    count toward `target_count`.
 //!
 //! # Example
 //!
