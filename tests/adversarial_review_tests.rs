@@ -172,7 +172,7 @@ fn test_map_elites_seed_population_respects_elitism() {
 
     // Seed with a high-fitness individual (fitness = 100.0)
     engine.seed_population(vec![TestDNA(100.0)], &ControlledEval);
-    let initial_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let initial_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert_eq!(
         initial_fitness, 100.0,
         "Initial elite should have fitness 100.0"
@@ -182,7 +182,7 @@ fn test_map_elites_seed_population_respects_elitism() {
     engine.seed_population(vec![TestDNA(10.0)], &ControlledEval);
 
     // The high-fitness individual should still be there (elitism preserved)
-    let final_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let final_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert_eq!(
         final_fitness, 100.0,
         "seed_population should preserve better elites. \
@@ -210,7 +210,7 @@ fn test_map_elites_seed_population_replaces_worse() {
     engine.seed_population(vec![TestDNA(100.0)], &ControlledEval);
 
     // The higher-fitness individual should replace the lower one
-    let final_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let final_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert_eq!(
         final_fitness, 100.0,
         "seed_population should replace worse individuals with better ones"
@@ -1173,7 +1173,7 @@ fn test_map_elites_nan_fitness_rejected_during_seed() {
 
     // First seed a valid individual with high fitness
     engine.seed_population(vec![TestDNA(0.4)], &NaNFitnessEval); // fitness = 40.0
-    let initial_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let initial_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert_eq!(
         initial_fitness, 40.0,
         "Initial elite should have fitness 40.0"
@@ -1183,7 +1183,7 @@ fn test_map_elites_nan_fitness_rejected_during_seed() {
     engine.seed_population(vec![TestDNA(0.9)], &NaNFitnessEval); // fitness = NaN
 
     // NaN individual should NOT overwrite the valid elite
-    let final_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let final_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert_eq!(
         final_fitness, 40.0,
         "NaN fitness individual should not overwrite valid elite. Got {}",
@@ -1254,7 +1254,7 @@ fn test_map_elites_nan_descriptor_rejected() {
 
     // Seed a valid individual in bin 0
     engine.seed_population(vec![TestDNA(0.05)], &NaNDescriptorEval); // desc = 0.05, maps to bin 0
-    let bin0_fitness = engine.archive_get(&vec![0]).unwrap().fitness;
+    let bin0_fitness = engine.archive_get(&[0]).unwrap().fitness;
     assert!(
         (bin0_fitness - 5.0).abs() < 0.1,
         "Bin 0 should have fitness ~5.0"
@@ -1264,7 +1264,7 @@ fn test_map_elites_nan_descriptor_rejected() {
     engine.seed_population(vec![TestDNA(0.9)], &NaNDescriptorEval); // desc = NaN
 
     // Bin 0 should still have the original elite, not the NaN-descriptor one
-    let final_bin0_fitness = engine.archive_get(&vec![0]).unwrap().fitness;
+    let final_bin0_fitness = engine.archive_get(&[0]).unwrap().fitness;
     assert!(
         (final_bin0_fitness - 5.0).abs() < 0.1,
         "NaN descriptor individual should not corrupt bin 0. Expected ~5.0, got {}",
@@ -1391,7 +1391,7 @@ fn test_map_elites_nan_recovery() {
 
     // Seed with valid individual
     engine.seed_population(vec![TestDNA(0.3)], &ControlledEval { return_nan: false });
-    let initial_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let initial_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert!(
         (initial_fitness - 30.0).abs() < 0.01,
         "Initial fitness should be ~30.0, got {}",
@@ -1400,7 +1400,7 @@ fn test_map_elites_nan_recovery() {
 
     // Try to overwrite with NaN (should be rejected)
     engine.seed_population(vec![TestDNA(0.9)], &ControlledEval { return_nan: true });
-    let after_nan_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let after_nan_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert!(
         (after_nan_fitness - 30.0).abs() < 0.01,
         "NaN should not overwrite valid elite, got {}",
@@ -1409,7 +1409,7 @@ fn test_map_elites_nan_recovery() {
 
     // Valid individual with lower fitness should not overwrite
     engine.seed_population(vec![TestDNA(0.1)], &ControlledEval { return_nan: false });
-    let after_lower_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let after_lower_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert!(
         (after_lower_fitness - 30.0).abs() < 0.01,
         "Lower fitness should not overwrite, got {}",
@@ -1418,7 +1418,7 @@ fn test_map_elites_nan_recovery() {
 
     // Valid individual with higher fitness should overwrite
     engine.seed_population(vec![TestDNA(0.5)], &ControlledEval { return_nan: false });
-    let final_fitness = engine.archive_get(&vec![5]).unwrap().fitness;
+    let final_fitness = engine.archive_get(&[5]).unwrap().fitness;
     assert!(
         (final_fitness - 50.0).abs() < 0.01,
         "Higher fitness should overwrite, got {}",

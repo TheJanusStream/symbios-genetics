@@ -85,14 +85,14 @@ struct RastriginEval;
 
 impl Evaluator<FloatVec> for RastriginEval {
     fn evaluate(&self, g: &FloatVec) -> (f32, Vec<f32>, Vec<f32>) {
-        let x = g.0.get(0).copied().unwrap_or(0.5) * 10.0 - 5.0;
+        let x = g.0.first().copied().unwrap_or(0.5) * 10.0 - 5.0;
         let y = g.0.get(1).copied().unwrap_or(0.5) * 10.0 - 5.0;
         let fitness = -(20.0 + x * x + y * y
             - 10.0 * (x * 2.0 * std::f32::consts::PI).cos()
             - 10.0 * (y * 2.0 * std::f32::consts::PI).cos());
         // Use first two dimensions as behavioral descriptor
         let desc = vec![
-            g.0.get(0).copied().unwrap_or(0.5),
+            g.0.first().copied().unwrap_or(0.5),
             g.0.get(1).copied().unwrap_or(0.5),
         ];
         (fitness, vec![fitness], desc)

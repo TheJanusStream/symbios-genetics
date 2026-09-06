@@ -235,7 +235,7 @@ fn test_map_elites_boundary_bins_equal_size() {
 
     for (bin, &count) in bin_counts.iter().enumerate() {
         assert!(
-            (count as i32 - expected as i32).abs() < tolerance as i32,
+            (count as i32 - expected).abs() < tolerance,
             "Bin {} has {} samples, expected ~{}. \
              Boundary bins should not be undersized.",
             bin,

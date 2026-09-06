@@ -49,8 +49,10 @@ fn displacement_is_euclidean() {
 
 #[test]
 fn up_alignment_clamps_to_unit_interval() {
-    let mut t = Trajectory::default();
-    t.up = [0.0, 0.7, 0.0];
+    let mut t = Trajectory {
+        up: [0.0, 0.7, 0.0],
+        ..Default::default()
+    };
     assert!((UpAlignment.score(&t) - 0.7).abs() < 1e-6);
     t.up = [0.0, -0.5, 0.0];
     assert_eq!(UpAlignment.score(&t), 0.0);
