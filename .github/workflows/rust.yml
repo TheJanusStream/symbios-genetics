@@ -23,6 +23,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
+          target: wasm32-unknown-unknown
           cache: false
 
       - name: Check Formatting
@@ -36,6 +37,11 @@ jobs:
 
       - name: Run Tests
         run: cargo test --verbose
+
+      # The library must build for the browser without an OS entropy source;
+      # this is what the narrowed rand features buy every consumer.
+      - name: Check wasm32 (lib)
+        run: cargo check --target wasm32-unknown-unknown --lib
 
       - name: Verify Examples
         run: |
